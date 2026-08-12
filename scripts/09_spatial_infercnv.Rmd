@@ -1,0 +1,1636 @@
+---
+title: "Module 09: Spatial inferCNV analysis"
+output: html_document
+date: "2026-08-11"
+---
+
+```{r}
+#==============================================================================
+# MODULE 10 — Spatial inferCNV analysis
+#==============================================================================
+
+# Purpose:
+#   Prepare tumor-bearing Visium spatial transcriptomic samples for inferCNV,
+#   define candidate tumor-associated observation spots and reference spots
+#   using spatial Seurat clusters, extract raw Spatial counts, validate the
+#   mouse gene-order reference, generate inferCNV annotation files, run
+#   inferCNV independently for each tumor-bearing slide, save completed
+#   inferCNV objects and supporting files, and preserve the prepared spatial
+#   Seurat objects for downstream CNV scoring and malignant-region
+#   classification.
+#
+# Input:
+#   data/processed/spatial/
+#     spatial_integrated_clustered_seurat.rds
+#
+# Reference:
+#   reference/
+#     mouse_GRCm38_genome_infercnv.txt
+#
+# Prepared object output:
+#   data/processed/spatial/infercnv/
+#     infercnv_prepared_spatial_objects.rds
+#
+# inferCNV outputs:
+#   results/spatial/infercnv/
+#     Niacin_Treatment/
+#     Vehicle_1/
+#     Vehicle_2/
+#
+# Diagnostic figures:
+#   figures/spatial/infercnv/
+#
+# inferCNV parameters:
+#   Assay:                  Spatial
+#   Raw expression:         counts
+#   Candidate tumor cluster: 7
+#   Reference groups:       all remaining clusters
+#   Cutoff:                 0.1
+#   Denoise:                TRUE
+#   HMM:                    TRUE
+#   Cluster by groups:      TRUE
+#   Threads:                4
+#   Leiden resolution:      0.01
+#
+# Notes:
+#   - inferCNV is run independently for each tumor-bearing spatial slide.
+#   - Normal_Tissue is retained separately and is not run through inferCNV.
+#   - Raw Spatial counts are used. SCT-normalized values are not used.
+#   - inferCNV identifies expression patterns consistent with broad CNV
+#     events; it does not constitute direct DNA-based evidence of malignancy.
+#   - CNV burden scoring and malignant-spot classification are intentionally
+#     performed in the following module rather than in this module.
+#==============================================================================
+
+
+#------------------------------------------------------------------------------
+# 1. Load required packages
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(infercnv)
+  library(Matrix)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(here)
+})
+
+
+#------------------------------------------------------------------------------
+# 2. Reproducibility settings
+#------------------------------------------------------------------------------
+
+set.seed(1234)
+
+
+#------------------------------------------------------------------------------
+# 3. Define analysis parameters
+#------------------------------------------------------------------------------
+
+spatial_assay <- "Spatial"
+
+sample_column <- "sample"
+
+cluster_column <- "spatial_cluster"
+
+annotation_column <- "infercnv_input_group"
+
+num_threads <- 4
+
+infercnv_cutoff <- 0.1
+
+run_hmm <- TRUE
+
+leiden_resolution <- 0.01
+
+excluded_chromosomes <- c(
+  "chrX",
+  "chrY",
+  "chrM"
+)
+
+tumor_samples <- c(
+  "Niacin_Treatment",
+  "Vehicle_1",
+  "Vehicle_2"
+)
+
+normal_sample <- "Normal_Tissue"
+
+
+#------------------------------------------------------------------------------
+# 4. Define candidate tumor-associated clusters
+#------------------------------------------------------------------------------
+
+# IMPORTANT:
+#   Cluster 7 is retained from the current validated working inferCNV script.
+#
+#   Cluster numbering is workflow-dependent and should not be assumed to be
+#   biologically equivalent across independently processed datasets.
+#
+#   Users adapting this protocol must define candidate tumor-associated
+#   clusters using their own histology, spatial organization, marker genes,
+#   and other biological evidence.
+
+candidate_tumor_clusters <- list(
+  Niacin_Treatment = c("7"),
+  Vehicle_1 = c("7"),
+  Vehicle_2 = c("7")
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Define repository paths
+#------------------------------------------------------------------------------
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "spatial"
+)
+
+infercnv_object_directory <- here::here(
+  "data",
+  "processed",
+  "spatial",
+  "infercnv"
+)
+
+results_directory <- here::here(
+  "results",
+  "spatial",
+  "infercnv"
+)
+
+figure_directory <- here::here(
+  "figures",
+  "spatial",
+  "infercnv"
+)
+
+reference_directory <- here::here(
+  "reference"
+)
+
+directories_to_create <- c(
+  infercnv_object_directory,
+  results_directory,
+  figure_directory
+)
+
+for (directory in directories_to_create) {
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+input_file <- file.path(
+  processed_directory,
+  "spatial_integrated_clustered_seurat.rds"
+)
+
+gene_order_file <- file.path(
+  reference_directory,
+  "mouse_GRCm38_genome_infercnv.txt"
+)
+
+prepared_object_file <- file.path(
+  infercnv_object_directory,
+  "infercnv_prepared_spatial_objects.rds"
+)
+
+analysis_manifest_file <- file.path(
+  results_directory,
+  "spatial_infercnv_analysis_manifest.csv"
+)
+
+parameter_file <- file.path(
+  results_directory,
+  "spatial_infercnv_parameters.csv"
+)
+
+
+cat(
+  "\n============================================================\n",
+  "MODULE 10 — Spatial inferCNV analysis\n",
+  "============================================================\n",
+  "Repository root:       ", here::here(), "\n",
+  "Input object:          ", input_file, "\n",
+  "Gene-order reference:  ", gene_order_file, "\n",
+  "Prepared objects:      ", infercnv_object_directory, "\n",
+  "inferCNV results:      ", results_directory, "\n",
+  "Diagnostic figures:   ", figure_directory, "\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Validate and load integrated spatial object
+#------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+  stop(
+    "Integrated spatial Seurat object was not found:\n",
+    input_file,
+    "\n\nRun the spatial processing modules before Module 10."
+  )
+}
+
+cat(
+  "Loading integrated spatial Seurat object...\n"
+)
+
+spatial_object <- readRDS(
+  input_file
+)
+
+if (!inherits(spatial_object, "Seurat")) {
+  stop(
+    "Loaded input file is not a valid Seurat object."
+  )
+}
+
+available_assays <- names(
+  spatial_object@assays
+)
+
+if (!spatial_assay %in% available_assays) {
+  stop(
+    "Required Spatial assay was not found.\n",
+    "Available assays: ",
+    paste(
+      available_assays,
+      collapse = ", "
+    )
+  )
+}
+
+required_metadata <- c(
+  sample_column,
+  cluster_column
+)
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(spatial_object@meta.data)
+)
+
+if (length(missing_metadata) > 0) {
+  stop(
+    "Required metadata column(s) missing:\n",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+Seurat::DefaultAssay(
+  spatial_object
+) <- spatial_assay
+
+cat(
+  "Spatial object loaded successfully:\n",
+  "  Features: ", nrow(spatial_object), "\n",
+  "  Spots:    ", ncol(spatial_object), "\n",
+  "  Samples:  ",
+  length(
+    unique(
+      spatial_object@meta.data[[sample_column]]
+    )
+  ),
+  "\n",
+  "  Clusters: ",
+  length(
+    unique(
+      spatial_object@meta.data[[cluster_column]]
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Validate expected samples
+#------------------------------------------------------------------------------
+
+expected_samples <- c(
+  normal_sample,
+  tumor_samples
+)
+
+observed_samples <- sort(
+  unique(
+    as.character(
+      spatial_object@meta.data[[sample_column]]
+    )
+  )
+)
+
+missing_samples <- setdiff(
+  expected_samples,
+  observed_samples
+)
+
+if (length(missing_samples) > 0) {
+  stop(
+    "Expected spatial sample(s) missing:\n",
+    paste(
+      missing_samples,
+      collapse = ", "
+    )
+  )
+}
+
+cat(
+  "\nSpatial spots by sample:\n"
+)
+
+print(
+  table(
+    spatial_object@meta.data[[sample_column]]
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 8. Validate raw Spatial counts
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating raw Spatial counts\n",
+  "------------------------------------------------------------\n"
+)
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_object[[spatial_assay]]
+)
+
+cat(
+  "Spatial assay layers:\n"
+)
+
+print(
+  spatial_layers
+)
+
+if (sum(grepl("^counts", spatial_layers)) > 1) {
+  cat(
+    "\nMultiple Spatial count layers detected.\n",
+    "Joining Spatial assay layers before inferCNV...\n",
+    sep = ""
+  )
+
+  spatial_object <- SeuratObject::JoinLayers(
+    spatial_object,
+    assay = spatial_assay
+  )
+}
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_object[[spatial_assay]]
+)
+
+if (!"counts" %in% spatial_layers) {
+  stop(
+    "A single raw 'counts' layer was not available after layer preparation."
+  )
+}
+
+raw_count_check <- Seurat::GetAssayData(
+  object = spatial_object,
+  assay = spatial_assay,
+  layer = "counts"
+)
+
+if (nrow(raw_count_check) == 0 || ncol(raw_count_check) == 0) {
+  stop(
+    "Raw Spatial count matrix is empty."
+  )
+}
+
+cat(
+  "Raw Spatial counts confirmed:\n",
+  "  Genes: ", nrow(raw_count_check), "\n",
+  "  Spots: ", ncol(raw_count_check), "\n",
+  sep = ""
+)
+
+rm(
+  raw_count_check
+)
+
+
+#------------------------------------------------------------------------------
+# 9. Validate inferCNV gene-order file
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating inferCNV gene-order reference\n",
+  "------------------------------------------------------------\n"
+)
+
+if (!file.exists(gene_order_file)) {
+  stop(
+    "inferCNV gene-order file was not found:\n",
+    gene_order_file
+  )
+}
+
+gene_order_check <- utils::read.delim(
+  gene_order_file,
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+if (ncol(gene_order_check) < 4) {
+  stop(
+    "Gene-order file contains fewer than four columns."
+  )
+}
+
+gene_order_check <- gene_order_check[, 1:4]
+
+colnames(gene_order_check) <- c(
+  "gene",
+  "chromosome",
+  "start",
+  "end"
+)
+
+if (anyDuplicated(gene_order_check$gene) > 0) {
+  warning(
+    "Duplicated genes were detected in the inferCNV gene-order file."
+  )
+}
+
+if (any(is.na(gene_order_check$start)) ||
+    any(is.na(gene_order_check$end))) {
+  stop(
+    "Missing genomic coordinates were detected in the gene-order file."
+  )
+}
+
+shared_gene_order_genes <- intersect(
+  rownames(spatial_object),
+  gene_order_check$gene
+)
+
+cat(
+  "Gene-order reference:\n",
+  "  Rows:             ", nrow(gene_order_check), "\n",
+  "  Spatial genes:    ", nrow(spatial_object), "\n",
+  "  Shared genes:     ", length(shared_gene_order_genes), "\n",
+  "  Shared fraction:  ",
+  round(
+    100 *
+      length(shared_gene_order_genes) /
+      nrow(spatial_object),
+    2
+  ),
+  "%\n",
+  sep = ""
+)
+
+if (length(shared_gene_order_genes) == 0) {
+  stop(
+    "No shared genes were found between the spatial object and gene-order file."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 10. Save gene-order validation summary
+#------------------------------------------------------------------------------
+
+gene_order_summary <- data.frame(
+  spatial_genes = nrow(spatial_object),
+  gene_order_genes = nrow(gene_order_check),
+  shared_genes = length(shared_gene_order_genes),
+  shared_percent = 100 *
+    length(shared_gene_order_genes) /
+    nrow(spatial_object)
+)
+
+gene_order_summary_file <- file.path(
+  results_directory,
+  "spatial_infercnv_gene_order_summary.csv"
+)
+
+utils::write.csv(
+  gene_order_summary,
+  gene_order_summary_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 11. Split normal and tumor-bearing spatial samples
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Separating spatial samples\n",
+  "------------------------------------------------------------\n"
+)
+
+sample_vector <- as.character(
+  spatial_object@meta.data[[sample_column]]
+)
+
+normal_cells <- colnames(spatial_object)[
+  sample_vector == normal_sample
+]
+
+normal_seurat <- subset(
+  spatial_object,
+  cells = normal_cells
+)
+
+sample_objects <- list()
+
+for (sample_name in tumor_samples) {
+  sample_cells <- colnames(spatial_object)[
+    sample_vector == sample_name
+  ]
+
+  if (length(sample_cells) == 0) {
+    stop(
+      "No spatial spots were found for tumor sample: ",
+      sample_name
+    )
+  }
+
+  sample_objects[[sample_name]] <- subset(
+    spatial_object,
+    cells = sample_cells
+  )
+}
+
+cat(
+  "Normal tissue spots: ",
+  ncol(normal_seurat),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nTumor-bearing spatial spot counts:\n"
+)
+
+print(
+  vapply(
+    sample_objects,
+    ncol,
+    numeric(1)
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 12. Define sample-to-image mapping
+#------------------------------------------------------------------------------
+
+image_sample_map <- data.frame(
+  sample_name = c(
+    "Niacin_Treatment",
+    "Vehicle_1",
+    "Vehicle_2"
+  ),
+  image_name = c(
+    "Niacin2_B5",
+    "Vehicle1_C5",
+    "Vehicle2_D5"
+  ),
+  display_name = c(
+    "Niacin B5",
+    "Vehicle C5",
+    "Vehicle D5"
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 13. Visualize spatial clusters before inferCNV grouping
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Visualizing spatial clusters before inferCNV grouping\n",
+  "------------------------------------------------------------\n"
+)
+
+cluster_plot_files <- character(0)
+
+for (i in seq_len(nrow(image_sample_map))) {
+  sample_name <- image_sample_map$sample_name[i]
+
+  image_name <- image_sample_map$image_name[i]
+
+  display_name <- image_sample_map$display_name[i]
+
+  sample_object <- sample_objects[[sample_name]]
+
+  if (!image_name %in% Seurat::Images(sample_object)) {
+    warning(
+      "Image ",
+      image_name,
+      " was not found for ",
+      sample_name
+    )
+
+    next
+  }
+
+  cluster_plot <- Seurat::SpatialDimPlot(
+    sample_object,
+    group.by = cluster_column,
+    images = image_name,
+    label = TRUE,
+    label.size = 4,
+    repel = TRUE,
+    pt.size.factor = 1.6
+  ) +
+    ggplot2::labs(
+      title = paste0(
+        display_name,
+        " — spatial clusters"
+      ),
+      fill = "Cluster"
+    ) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        hjust = 0.5,
+        face = "bold"
+      )
+    )
+
+  cluster_plot_file <- file.path(
+    figure_directory,
+    paste0(
+      sample_name,
+      "_spatial_clusters_before_infercnv.png"
+    )
+  )
+
+  ggplot2::ggsave(
+    filename = cluster_plot_file,
+    plot = cluster_plot,
+    width = 8,
+    height = 8,
+    dpi = 600
+  )
+
+  cluster_plot_files <- c(
+    cluster_plot_files,
+    cluster_plot_file
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 14. Validate candidate tumor-associated clusters
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating candidate tumor-associated clusters\n",
+  "------------------------------------------------------------\n"
+)
+
+for (sample_name in names(sample_objects)) {
+  observed_clusters <- unique(
+    as.character(
+      sample_objects[[sample_name]]@meta.data[[cluster_column]]
+    )
+  )
+
+  requested_clusters <- as.character(
+    candidate_tumor_clusters[[sample_name]]
+  )
+
+  missing_candidate_clusters <- setdiff(
+    requested_clusters,
+    observed_clusters
+  )
+
+  if (length(missing_candidate_clusters) > 0) {
+    stop(
+      "Candidate tumor cluster(s) not found for ",
+      sample_name,
+      ": ",
+      paste(
+        missing_candidate_clusters,
+        collapse = ", "
+      )
+    )
+  }
+
+  cat(
+    sample_name,
+    " candidate tumor cluster(s): ",
+    paste(
+      requested_clusters,
+      collapse = ", "
+    ),
+    "\n",
+    sep = ""
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 15. Define reference clusters
+#------------------------------------------------------------------------------
+
+reference_clusters <- list()
+
+for (sample_name in names(sample_objects)) {
+  observed_clusters <- unique(
+    as.character(
+      sample_objects[[sample_name]]@meta.data[[cluster_column]]
+    )
+  )
+
+  reference_clusters[[sample_name]] <- setdiff(
+    observed_clusters,
+    as.character(
+      candidate_tumor_clusters[[sample_name]]
+    )
+  )
+
+  if (length(reference_clusters[[sample_name]]) == 0) {
+    stop(
+      "No reference clusters remained for sample: ",
+      sample_name
+    )
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# 16. Define function to assign inferCNV input groups
+#------------------------------------------------------------------------------
+
+make_infercnv_groups <- function(
+    seurat_object,
+    candidate_clusters,
+    reference_clusters,
+    cluster_column
+) {
+  clusters <- as.character(
+    seurat_object@meta.data[[cluster_column]]
+  )
+
+  groups <- dplyr::case_when(
+    clusters %in% as.character(candidate_clusters) ~ "observation",
+    clusters %in% as.character(reference_clusters) ~ "reference",
+    TRUE ~ "excluded"
+  )
+
+  names(groups) <- colnames(
+    seurat_object
+  )
+
+  return(
+    groups
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 17. Assign inferCNV input groups
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Assigning inferCNV input groups\n",
+  "------------------------------------------------------------\n"
+)
+
+for (sample_name in names(sample_objects)) {
+  sample_objects[[sample_name]]$infercnv_input_group <-
+    make_infercnv_groups(
+      seurat_object = sample_objects[[sample_name]],
+      candidate_clusters = candidate_tumor_clusters[[sample_name]],
+      reference_clusters = reference_clusters[[sample_name]],
+      cluster_column = cluster_column
+    )
+}
+
+cat(
+  "\ninferCNV input-group counts:\n"
+)
+
+for (sample_name in names(sample_objects)) {
+  cat(
+    "\n",
+    sample_name,
+    ":\n",
+    sep = ""
+  )
+
+  print(
+    table(
+      sample_objects[[sample_name]]$infercnv_input_group
+    )
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 18. Create inferCNV input-group summary table
+#------------------------------------------------------------------------------
+
+input_group_summary <- data.frame()
+
+for (sample_name in names(sample_objects)) {
+  current_counts <- as.data.frame(
+    table(
+      sample_objects[[sample_name]]$infercnv_input_group
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  colnames(current_counts) <- c(
+    "infercnv_group",
+    "spots"
+  )
+
+  current_counts$sample <- sample_name
+
+  input_group_summary <- rbind(
+    input_group_summary,
+    current_counts
+  )
+}
+
+input_group_summary <- input_group_summary[, c(
+  "sample",
+  "infercnv_group",
+  "spots"
+)]
+
+input_group_summary_file <- file.path(
+  results_directory,
+  "spatial_infercnv_input_group_summary.csv"
+)
+
+utils::write.csv(
+  input_group_summary,
+  input_group_summary_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 19. Visualize inferCNV input groups spatially
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Visualizing inferCNV input groups\n",
+  "------------------------------------------------------------\n"
+)
+
+input_group_plot_files <- character(0)
+
+input_group_plot_list <- list()
+
+for (i in seq_len(nrow(image_sample_map))) {
+  sample_name <- image_sample_map$sample_name[i]
+
+  image_name <- image_sample_map$image_name[i]
+
+  display_name <- image_sample_map$display_name[i]
+
+  sample_object <- sample_objects[[sample_name]]
+
+  if (!image_name %in% Seurat::Images(sample_object)) {
+    warning(
+      "Image ",
+      image_name,
+      " was not found for ",
+      sample_name
+    )
+
+    next
+  }
+
+  input_group_plot <- Seurat::SpatialDimPlot(
+    object = sample_object,
+    group.by = annotation_column,
+    images = image_name,
+    pt.size.factor = 1.6
+  ) +
+    ggplot2::labs(
+      title = paste0(
+        display_name,
+        " — inferCNV input groups"
+      ),
+      fill = "Input group"
+    ) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        hjust = 0.5,
+        face = "bold"
+      )
+    )
+
+  input_group_plot_file <- file.path(
+    figure_directory,
+    paste0(
+      sample_name,
+      "_infercnv_input_groups.png"
+    )
+  )
+
+  ggplot2::ggsave(
+    filename = input_group_plot_file,
+    plot = input_group_plot,
+    width = 8,
+    height = 8,
+    dpi = 600
+  )
+
+  input_group_plot_files <- c(
+    input_group_plot_files,
+    input_group_plot_file
+  )
+
+  input_group_plot_list[[sample_name]] <- input_group_plot
+}
+
+
+#------------------------------------------------------------------------------
+# 20. Save combined inferCNV input-group overview
+#------------------------------------------------------------------------------
+
+combined_input_group_file <- NULL
+
+if (length(input_group_plot_list) > 0) {
+  combined_input_group_plot <- patchwork::wrap_plots(
+    input_group_plot_list,
+    ncol = 3
+  )
+
+  combined_input_group_file <- file.path(
+    figure_directory,
+    "spatial_infercnv_input_groups_all_slides.png"
+  )
+
+  ggplot2::ggsave(
+    filename = combined_input_group_file,
+    plot = combined_input_group_plot,
+    width = 18,
+    height = 6,
+    dpi = 600
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 21. Save inferCNV-prepared spatial objects
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Saving inferCNV-prepared spatial objects\n",
+  "------------------------------------------------------------\n"
+)
+
+prepared_spatial_objects <- list(
+  Normal_Tissue = normal_seurat,
+  Tumor_Samples = sample_objects
+)
+
+saveRDS(
+  object = prepared_spatial_objects,
+  file = prepared_object_file,
+  compress = TRUE
+)
+
+if (!file.exists(prepared_object_file)) {
+  stop(
+    "inferCNV-prepared spatial objects were not saved successfully."
+  )
+}
+
+cat(
+  "Prepared spatial objects saved successfully:\n",
+  prepared_object_file,
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 22. Save inferCNV analysis parameters
+#------------------------------------------------------------------------------
+
+candidate_cluster_string <- paste(
+  unique(
+    unlist(
+      candidate_tumor_clusters
+    )
+  ),
+  collapse = ","
+)
+
+infercnv_parameters <- data.frame(
+  parameter = c(
+    "spatial_assay",
+    "sample_column",
+    "cluster_column",
+    "annotation_column",
+    "candidate_tumor_cluster",
+    "reference_definition",
+    "cutoff",
+    "HMM",
+    "denoise",
+    "cluster_by_groups",
+    "num_threads",
+    "leiden_resolution",
+    "excluded_chromosomes"
+  ),
+  value = c(
+    spatial_assay,
+    sample_column,
+    cluster_column,
+    annotation_column,
+    candidate_cluster_string,
+    "All clusters except candidate tumor cluster",
+    infercnv_cutoff,
+    run_hmm,
+    TRUE,
+    TRUE,
+    num_threads,
+    leiden_resolution,
+    paste(
+      excluded_chromosomes,
+      collapse = ","
+    )
+  ),
+  stringsAsFactors = FALSE
+)
+
+utils::write.csv(
+  infercnv_parameters,
+  parameter_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 23. Define inferCNV analysis function
+#------------------------------------------------------------------------------
+
+run_spatial_infercnv <- function(
+    seurat_object,
+    sample_name,
+    gene_order_file,
+    results_directory,
+    spatial_assay,
+    annotation_column,
+    cutoff,
+    num_threads,
+    run_hmm,
+    leiden_resolution,
+    excluded_chromosomes
+) {
+  cat(
+    "\n============================================================\n",
+    "Running inferCNV — ",
+    sample_name,
+    "\n",
+    "============================================================\n",
+    sep = ""
+  )
+
+  if (!annotation_column %in% colnames(seurat_object@meta.data)) {
+    stop(
+      "inferCNV annotation column was not found for ",
+      sample_name,
+      ": ",
+      annotation_column
+    )
+  }
+
+  assay_layers <- SeuratObject::Layers(
+    seurat_object[[spatial_assay]]
+  )
+
+  if (sum(grepl("^counts", assay_layers)) > 1) {
+    seurat_object <- SeuratObject::JoinLayers(
+      seurat_object,
+      assay = spatial_assay
+    )
+  }
+
+  if (!"counts" %in% SeuratObject::Layers(
+    seurat_object[[spatial_assay]]
+  )) {
+    stop(
+      "Raw counts layer was not available for ",
+      sample_name
+    )
+  }
+
+  raw_counts <- Seurat::GetAssayData(
+    object = seurat_object,
+    assay = spatial_assay,
+    layer = "counts"
+  )
+
+  raw_counts <- methods::as(
+    raw_counts,
+    "dgCMatrix"
+  )
+
+  metadata <- seurat_object@meta.data[
+    colnames(raw_counts),
+    ,
+    drop = FALSE
+  ]
+
+  annotation <- data.frame(
+    infercnv_group = as.character(
+      metadata[[annotation_column]]
+    ),
+    row.names = rownames(metadata),
+    stringsAsFactors = FALSE
+  )
+
+  keep_spots <- rownames(annotation)[
+    annotation$infercnv_group %in%
+      c(
+        "reference",
+        "observation"
+      )
+  ]
+
+  raw_counts <- raw_counts[
+    ,
+    keep_spots,
+    drop = FALSE
+  ]
+
+  annotation <- annotation[
+    keep_spots,
+    ,
+    drop = FALSE
+  ]
+
+  if (!identical(
+    colnames(raw_counts),
+    rownames(annotation)
+  )) {
+    stop(
+      "Count matrix and inferCNV annotations are not aligned for ",
+      sample_name
+    )
+  }
+
+  group_counts <- table(
+    annotation$infercnv_group
+  )
+
+  cat(
+    "\nInput groups:\n"
+  )
+
+  print(
+    group_counts
+  )
+
+  if (!"reference" %in% names(group_counts)) {
+    stop(
+      "No reference spots were selected for ",
+      sample_name
+    )
+  }
+
+  if (!"observation" %in% names(group_counts)) {
+    stop(
+      "No observation spots were selected for ",
+      sample_name
+    )
+  }
+
+  sample_output_directory <- file.path(
+    results_directory,
+    sample_name
+  )
+
+  dir.create(
+    sample_output_directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+
+  annotation_file <- file.path(
+    sample_output_directory,
+    paste0(
+      sample_name,
+      "_infercnv_annotations.tsv"
+    )
+  )
+
+  annotation_export <- data.frame(
+    spot = rownames(annotation),
+    group = annotation$infercnv_group,
+    stringsAsFactors = FALSE
+  )
+
+  utils::write.table(
+    annotation_export,
+    file = annotation_file,
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE,
+    col.names = FALSE
+  )
+
+  if (!file.exists(annotation_file)) {
+    stop(
+      "inferCNV annotation file was not written for ",
+      sample_name
+    )
+  }
+
+  cat(
+    "Creating inferCNV object...\n"
+  )
+
+  infercnv_object <- infercnv::CreateInfercnvObject(
+    raw_counts_matrix = raw_counts,
+    annotations_file = annotation_file,
+    delim = "\t",
+    gene_order_file = gene_order_file,
+    ref_group_names = "reference",
+    chr_exclude = excluded_chromosomes
+  )
+
+  cat(
+    "Running inferCNV...\n",
+    "Output directory: ",
+    sample_output_directory,
+    "\n",
+    sep = ""
+  )
+
+  infercnv_result <- infercnv::run(
+    infercnv_object,
+    cutoff = cutoff,
+    out_dir = sample_output_directory,
+    cluster_by_groups = TRUE,
+    denoise = TRUE,
+    HMM = run_hmm,
+    num_threads = num_threads,
+    leiden_resolution = leiden_resolution,
+    plot_steps = FALSE
+  )
+
+  result_rds_file <- file.path(
+    sample_output_directory,
+    paste0(
+      sample_name,
+      "_infercnv_result.rds"
+    )
+  )
+
+  saveRDS(
+    object = infercnv_result,
+    file = result_rds_file,
+    compress = TRUE
+  )
+
+  if (!file.exists(result_rds_file)) {
+    stop(
+      "Final inferCNV RDS object was not saved for ",
+      sample_name
+    )
+  }
+
+  cat(
+    "inferCNV completed successfully for ",
+    sample_name,
+    ".\n",
+    sep = ""
+  )
+
+  return(
+    list(
+      infercnv_result = infercnv_result,
+      output_directory = sample_output_directory,
+      annotation_file = annotation_file,
+      result_file = result_rds_file,
+      annotation = annotation,
+      input_spots = ncol(raw_counts),
+      reference_spots = unname(group_counts["reference"]),
+      observation_spots = unname(group_counts["observation"])
+    )
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 24. Run inferCNV across tumor-bearing samples
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "Starting sample-level inferCNV analyses\n",
+  "============================================================\n"
+)
+
+infercnv_results <- list()
+
+for (sample_name in names(sample_objects)) {
+  infercnv_results[[sample_name]] <- run_spatial_infercnv(
+    seurat_object = sample_objects[[sample_name]],
+    sample_name = sample_name,
+    gene_order_file = gene_order_file,
+    results_directory = results_directory,
+    spatial_assay = spatial_assay,
+    annotation_column = annotation_column,
+    cutoff = infercnv_cutoff,
+    num_threads = num_threads,
+    run_hmm = run_hmm,
+    leiden_resolution = leiden_resolution,
+    excluded_chromosomes = excluded_chromosomes
+  )
+}
+
+cat(
+  "\nAll tumor-bearing spatial inferCNV analyses completed.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 25. Create inferCNV analysis manifest
+#------------------------------------------------------------------------------
+
+analysis_manifest <- data.frame(
+  sample = names(infercnv_results),
+  input_spots = vapply(
+    infercnv_results,
+    function(x) x$input_spots,
+    numeric(1)
+  ),
+  reference_spots = vapply(
+    infercnv_results,
+    function(x) x$reference_spots,
+    numeric(1)
+  ),
+  observation_spots = vapply(
+    infercnv_results,
+    function(x) x$observation_spots,
+    numeric(1)
+  ),
+  output_directory = vapply(
+    infercnv_results,
+    function(x) x$output_directory,
+    character(1)
+  ),
+  annotation_file = vapply(
+    infercnv_results,
+    function(x) x$annotation_file,
+    character(1)
+  ),
+  result_file = vapply(
+    infercnv_results,
+    function(x) x$result_file,
+    character(1)
+  ),
+  stringsAsFactors = FALSE
+)
+
+utils::write.csv(
+  analysis_manifest,
+  analysis_manifest_file,
+  row.names = FALSE
+)
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "inferCNV analysis manifest\n",
+  "------------------------------------------------------------\n"
+)
+
+print(
+  analysis_manifest
+)
+
+
+#------------------------------------------------------------------------------
+# 26. Save lightweight inferCNV result index
+#------------------------------------------------------------------------------
+
+infercnv_result_index <- lapply(
+  infercnv_results,
+  function(x) {
+    list(
+      output_directory = x$output_directory,
+      annotation_file = x$annotation_file,
+      result_file = x$result_file,
+      input_spots = x$input_spots,
+      reference_spots = x$reference_spots,
+      observation_spots = x$observation_spots
+    )
+  }
+)
+
+infercnv_result_index_file <- file.path(
+  infercnv_object_directory,
+  "spatial_infercnv_result_index.rds"
+)
+
+saveRDS(
+  object = infercnv_result_index,
+  file = infercnv_result_index_file,
+  compress = TRUE
+)
+
+
+#------------------------------------------------------------------------------
+# 27. Save session information
+#------------------------------------------------------------------------------
+
+session_info_file <- file.path(
+  results_directory,
+  "spatial_infercnv_sessionInfo.txt"
+)
+
+writeLines(
+  capture.output(
+    sessionInfo()
+  ),
+  con = session_info_file
+)
+
+
+#------------------------------------------------------------------------------
+# 28. Validate expected Module 10 outputs
+#------------------------------------------------------------------------------
+
+expected_object_files <- c(
+  prepared_object_file,
+  infercnv_result_index_file
+)
+
+expected_result_files <- c(
+  gene_order_summary_file,
+  input_group_summary_file,
+  parameter_file,
+  analysis_manifest_file,
+  session_info_file
+)
+
+expected_infercnv_result_files <- vapply(
+  infercnv_results,
+  function(x) x$result_file,
+  character(1)
+)
+
+expected_annotation_files <- vapply(
+  infercnv_results,
+  function(x) x$annotation_file,
+  character(1)
+)
+
+expected_figure_files <- c(
+  cluster_plot_files,
+  input_group_plot_files
+)
+
+if (!is.null(combined_input_group_file)) {
+  expected_figure_files <- c(
+    expected_figure_files,
+    combined_input_group_file
+  )
+}
+
+missing_object_files <- expected_object_files[
+  !file.exists(expected_object_files)
+]
+
+missing_result_files <- expected_result_files[
+  !file.exists(expected_result_files)
+]
+
+missing_infercnv_files <- expected_infercnv_result_files[
+  !file.exists(expected_infercnv_result_files)
+]
+
+missing_annotation_files <- expected_annotation_files[
+  !file.exists(expected_annotation_files)
+]
+
+missing_figure_files <- expected_figure_files[
+  !file.exists(expected_figure_files)
+]
+
+if (length(missing_object_files) > 0) {
+  stop(
+    "One or more expected Module 10 object files were not created:\n",
+    paste(
+      missing_object_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_result_files) > 0) {
+  stop(
+    "One or more expected Module 10 result files were not created:\n",
+    paste(
+      missing_result_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_infercnv_files) > 0) {
+  stop(
+    "One or more inferCNV result objects were not created:\n",
+    paste(
+      missing_infercnv_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_annotation_files) > 0) {
+  stop(
+    "One or more inferCNV annotation files were not created:\n",
+    paste(
+      missing_annotation_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_figure_files) > 0) {
+  stop(
+    "One or more expected Module 10 figure files were not created:\n",
+    paste(
+      missing_figure_files,
+      collapse = "\n"
+    )
+  )
+}
+
+cat(
+  "All expected Module 10 outputs were created successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 29. Final module summary
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "MODULE 10 COMPLETE — Spatial inferCNV analysis\n",
+  "============================================================\n",
+  "Tumor-bearing slides:      ", length(sample_objects), "\n",
+  "Normal slide retained:     ", ncol(normal_seurat), " spots\n",
+  "Candidate tumor cluster:   ", candidate_cluster_string, "\n",
+  "Reference definition:      all remaining clusters\n",
+  "inferCNV cutoff:           ", infercnv_cutoff, "\n",
+  "HMM enabled:               ", run_hmm, "\n",
+  "Threads:                   ", num_threads, "\n",
+  "Gene-order shared genes:   ",
+  length(shared_gene_order_genes),
+  "\n",
+  "\n",
+  "Prepared spatial objects:\n",
+  "  ", prepared_object_file, "\n",
+  "\n",
+  "inferCNV result index:\n",
+  "  ", infercnv_result_index_file, "\n",
+  "\n",
+  "Sample-level inferCNV results:\n",
+  "  ", results_directory, "\n",
+  "\n",
+  "Diagnostic figures:\n",
+  "  ", figure_directory, "\n",
+  "\n",
+  "Next module:\n",
+  "  Spatial inferCNV CNV scoring and malignant-spot classification\n",
+  "============================================================\n\n",
+  sep = ""
+)
+```
+

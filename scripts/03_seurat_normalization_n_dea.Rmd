@@ -1,0 +1,1976 @@
+---
+title: "Module 03: Single-cell RNA-seq normalization, clustering, and differential expression analysis"
+output: html_document
+date: "2026-08-06"
+---
+
+```{r}
+
+#==============================================================================
+# MODULE 03 — Single-cell RNA-seq normalization, clustering, and DEA
+#==============================================================================
+
+# Purpose:
+#   Process the QC-filtered GSE298688 single-cell RNA-seq Seurat object
+#   generated in Module 02. Normalize RNA expression, identify highly
+#   variable genes, scale expression, perform PCA, evaluate potential
+#   sample-associated effects, construct a nearest-neighbor graph, cluster
+#   cells, generate UMAP embeddings, characterize cluster composition,
+#   perform cluster-level differential expression analysis, generate marker
+#   visualizations, and save the processed Seurat object for downstream
+#   cell-type annotation.
+#
+# Input:
+#   data/processed/single_cell/
+#     GSE298688_QC_filtered_seurat.rds
+#
+# Output object:
+#   data/processed/single_cell/
+#     GSE298688_processed_clustered_seurat.rds
+#
+# Output tables:
+#   results/single_cell/processing/
+#   results/single_cell/cluster_markers/
+#
+# Output figures:
+#   figures/single_cell/processing/
+#   figures/single_cell/cluster_markers/
+#   figures/single_cell/cluster_markers/volcano_plots/
+#
+# Processing parameters:
+#   Normalization:       LogNormalize
+#   Scale factor:        10,000
+#   Variable features:   2,000
+#   PCA components:      50
+#   Dimensions used:     1:30
+#   Clustering:          Louvain/Seurat graph clustering
+#   Resolution:          0.5
+#   UMAP dimensions:     1:30
+#
+# Differential expression:
+#   Test:                Wilcoxon rank-sum test
+#   Minimum percentage:  0.10
+#   log2FC threshold:    0.25
+#   Adjusted P threshold used for visualization: 0.05
+#
+# Notes:
+#   - Harmony was evaluated during workflow development but was not retained
+#     for the final analysis because the uncorrected embedding showed adequate
+#     mixing across samples.
+#   - Because sample identity is partially associated with experimental
+#     condition, unnecessary batch correction could remove biological signal.
+#   - Cluster-level DEA compares each Seurat cluster with all remaining cells.
+#   - Treatment-level DEA is biologically distinct and is not performed here.
+#   - The processed object generated here is used in Module 04 for SingleR
+#     cell-type annotation.
+#==============================================================================
+
+
+#------------------------------------------------------------------------------
+# 1. Load required packages
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(ggrepel)
+  library(here)
+})
+
+
+#------------------------------------------------------------------------------
+# 2. Reproducibility settings
+#------------------------------------------------------------------------------
+
+set.seed(1234)
+
+
+#------------------------------------------------------------------------------
+# 3. Define analysis parameters
+#------------------------------------------------------------------------------
+
+normalization_scale_factor <- 10000
+
+number_variable_features <- 2000
+
+number_pcs <- 50
+
+analysis_dimensions <- 1:30
+
+clustering_resolution <- 0.5
+
+marker_min_pct <- 0.10
+
+marker_log2fc_threshold <- 0.25
+
+adjusted_p_threshold <- 0.05
+
+top_markers_per_cluster <- 10
+
+
+#------------------------------------------------------------------------------
+# 4. Define repository paths
+#------------------------------------------------------------------------------
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell"
+)
+
+
+processing_results_directory <- here::here(
+  "results",
+  "single_cell",
+  "processing"
+)
+
+
+marker_results_directory <- here::here(
+  "results",
+  "single_cell",
+  "cluster_markers"
+)
+
+
+processing_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "processing"
+)
+
+
+marker_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "cluster_markers"
+)
+
+
+volcano_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "cluster_markers",
+  "volcano_plots"
+)
+
+
+directories_to_create <- c(
+  processed_directory,
+  processing_results_directory,
+  marker_results_directory,
+  processing_figure_directory,
+  marker_figure_directory,
+  volcano_figure_directory
+)
+
+
+for (directory in directories_to_create) {
+
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+
+input_file <- file.path(
+  processed_directory,
+  "GSE298688_QC_filtered_seurat.rds"
+)
+
+
+processed_object_file <- file.path(
+  processed_directory,
+  "GSE298688_processed_clustered_seurat.rds"
+)
+
+
+cat(
+  "\n============================================================\n",
+  "MODULE 03 — Single-cell normalization, clustering, and DEA\n",
+  "============================================================\n",
+  "Repository root:       ", here::here(), "\n",
+  "Input object:          ", input_file, "\n",
+  "Processed data:        ", processed_directory, "\n",
+  "Processing results:    ", processing_results_directory, "\n",
+  "Marker results:        ", marker_results_directory, "\n",
+  "Processing figures:    ", processing_figure_directory, "\n",
+  "Marker figures:        ", marker_figure_directory, "\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Validate and load Module 02 output
+#------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+
+  stop(
+    "Module 02 output was not found:\n",
+    input_file,
+    "\n\nRun 02_seurat_qc_filtering.Rmd before Module 03."
+  )
+}
+
+
+cat(
+  "Loading QC-filtered single-cell Seurat object...\n"
+)
+
+
+single_cell <- readRDS(
+  input_file
+)
+
+
+if (!inherits(single_cell, "Seurat")) {
+
+  stop(
+    "Loaded input file is not a valid Seurat object."
+  )
+}
+
+
+if (!"RNA" %in% Seurat::Assays(single_cell)) {
+
+  stop(
+    "RNA assay was not found in the input Seurat object."
+  )
+}
+
+
+Seurat::DefaultAssay(
+  single_cell
+) <- "RNA"
+
+
+required_metadata <- c(
+  "sample",
+  "condition",
+  "nCount_RNA",
+  "nFeature_RNA",
+  "percent.mt"
+)
+
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(
+    single_cell@meta.data
+  )
+)
+
+
+if (length(missing_metadata) > 0) {
+
+  stop(
+    "Required metadata column(s) missing from input object:\n",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+
+cat(
+  "Object loaded successfully:\n",
+  "  Genes:   ", nrow(single_cell), "\n",
+  "  Cells:   ", ncol(single_cell), "\n",
+  "  Samples: ",
+  length(
+    unique(
+      single_cell$sample
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+cat(
+  "\nCells by sample:\n"
+)
+
+
+print(
+  table(
+    single_cell$sample
+  )
+)
+
+
+cat(
+  "\nCells by condition:\n"
+)
+
+
+print(
+  table(
+    single_cell$condition
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Inspect and join Seurat v5 RNA assay layers
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Inspecting RNA assay layers\n",
+  "------------------------------------------------------------\n"
+)
+
+
+rna_layers_before <- SeuratObject::Layers(
+  single_cell[["RNA"]]
+)
+
+
+cat(
+  "RNA layers before joining:\n"
+)
+
+
+print(
+  rna_layers_before
+)
+
+
+if (length(rna_layers_before) > 1) {
+
+  cat(
+    "\nMultiple RNA assay layers detected.\n",
+    "Joining layers before normalization and differential expression...\n",
+    sep = ""
+  )
+
+
+  single_cell <- SeuratObject::JoinLayers(
+    single_cell,
+    assay = "RNA"
+  )
+}
+
+
+rna_layers_after <- SeuratObject::Layers(
+  single_cell[["RNA"]]
+)
+
+
+cat(
+  "\nRNA layers available after layer check:\n"
+)
+
+
+print(
+  rna_layers_after
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Normalize RNA expression
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Normalizing RNA expression\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::NormalizeData(
+  single_cell,
+  assay = "RNA",
+  normalization.method = "LogNormalize",
+  scale.factor = normalization_scale_factor,
+  verbose = FALSE
+)
+
+
+cat(
+  "RNA normalization completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 8. Identify highly variable genes
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Identifying highly variable genes\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::FindVariableFeatures(
+  single_cell,
+  assay = "RNA",
+  selection.method = "vst",
+  nfeatures = number_variable_features,
+  verbose = FALSE
+)
+
+
+number_variable_features_identified <- length(
+  Seurat::VariableFeatures(
+    single_cell
+  )
+)
+
+
+if (number_variable_features_identified == 0) {
+
+  stop(
+    "No highly variable genes were identified."
+  )
+}
+
+
+cat(
+  "Variable features identified: ",
+  number_variable_features_identified,
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 9. Generate variable-feature plot
+#------------------------------------------------------------------------------
+
+variable_feature_plot <- Seurat::VariableFeaturePlot(
+  single_cell
+) +
+  ggplot2::labs(
+    title = "Highly Variable Genes"
+  )
+
+
+print(
+  variable_feature_plot
+)
+
+
+variable_feature_plot_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_variable_features.png"
+)
+
+
+ggplot2::ggsave(
+  filename = variable_feature_plot_file,
+  plot = variable_feature_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 10. Scale highly variable genes
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Scaling highly variable genes\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::ScaleData(
+  single_cell,
+  assay = "RNA",
+  features = Seurat::VariableFeatures(
+    single_cell
+  ),
+  verbose = FALSE
+)
+
+
+cat(
+  "Variable features scaled successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 11. Perform principal component analysis
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Performing principal component analysis\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::RunPCA(
+  single_cell,
+  assay = "RNA",
+  features = Seurat::VariableFeatures(
+    single_cell
+  ),
+  npcs = number_pcs,
+  verbose = FALSE
+)
+
+
+if (!"pca" %in% names(
+  single_cell@reductions
+)) {
+
+  stop(
+    "PCA reduction was not created successfully."
+  )
+}
+
+
+cat(
+  "PCA completed successfully.\n",
+  "Principal components calculated: ",
+  ncol(
+    Seurat::Embeddings(
+      single_cell,
+      reduction = "pca"
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 12. Generate PCA elbow plot
+#------------------------------------------------------------------------------
+
+elbow_plot <- Seurat::ElbowPlot(
+  single_cell,
+  ndims = number_pcs
+) +
+  ggplot2::labs(
+    title = "PCA Elbow Plot"
+  )
+
+
+print(
+  elbow_plot
+)
+
+
+elbow_plot_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_PCA_elbow_plot.png"
+)
+
+
+ggplot2::ggsave(
+  filename = elbow_plot_file,
+  plot = elbow_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 13. Assess sample-associated effects in PCA space
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Assessing sample-associated effects in PCA space\n",
+  "------------------------------------------------------------\n"
+)
+
+
+pca_sample_plot <- Seurat::DimPlot(
+  single_cell,
+  reduction = "pca",
+  group.by = "sample"
+) +
+  ggplot2::ggtitle(
+    "PCA by Sample"
+  )
+
+
+pca_condition_plot <- Seurat::DimPlot(
+  single_cell,
+  reduction = "pca",
+  group.by = "condition"
+) +
+  ggplot2::ggtitle(
+    "PCA by Experimental Condition"
+  )
+
+
+print(
+  pca_sample_plot
+)
+
+
+print(
+  pca_condition_plot
+)
+
+
+pca_sample_plot_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_PCA_by_sample.png"
+)
+
+
+pca_condition_plot_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_PCA_by_condition.png"
+)
+
+
+ggplot2::ggsave(
+  filename = pca_sample_plot_file,
+  plot = pca_sample_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+ggplot2::ggsave(
+  filename = pca_condition_plot_file,
+  plot = pca_condition_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 14. Generate uncorrected UMAP for batch-effect assessment
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Generating uncorrected UMAP for batch assessment\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::RunUMAP(
+  single_cell,
+  reduction = "pca",
+  dims = analysis_dimensions,
+  reduction.name = "umap_uncorrected",
+  reduction.key = "UMAPuncorrected_",
+  seed.use = 1234,
+  verbose = FALSE
+)
+
+
+uncorrected_umap_sample <- Seurat::DimPlot(
+  single_cell,
+  reduction = "umap_uncorrected",
+  group.by = "sample"
+) +
+  ggplot2::ggtitle(
+    "Uncorrected UMAP by Sample"
+  )
+
+
+uncorrected_umap_condition <- Seurat::DimPlot(
+  single_cell,
+  reduction = "umap_uncorrected",
+  group.by = "condition"
+) +
+  ggplot2::ggtitle(
+    "Uncorrected UMAP by Experimental Condition"
+  )
+
+
+print(
+  uncorrected_umap_sample
+)
+
+
+print(
+  uncorrected_umap_condition
+)
+
+
+uncorrected_sample_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_uncorrected_UMAP_by_sample.png"
+)
+
+
+uncorrected_condition_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_uncorrected_UMAP_by_condition.png"
+)
+
+
+ggplot2::ggsave(
+  filename = uncorrected_sample_file,
+  plot = uncorrected_umap_sample,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+ggplot2::ggsave(
+  filename = uncorrected_condition_file,
+  plot = uncorrected_umap_condition,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 15. Optional Harmony batch-correction assessment
+#------------------------------------------------------------------------------
+
+# Harmony was evaluated during development of this workflow.
+#
+# The uncorrected PCA and UMAP showed adequate mixing of cells from C2_S2,
+# N1_S3, and N2_S4 within major transcriptional populations. Harmony
+# correction was therefore not used for final graph construction or
+# clustering.
+#
+# Because sample identity is partially associated with experimental condition
+# in this dataset, unnecessary correction could remove biological variation.
+#
+# Users adapting this protocol to another dataset may evaluate Harmony or
+# another integration strategy if strong technical sample separation is
+# observed.
+#
+# Example:
+#
+# suppressPackageStartupMessages({
+#   library(harmony)
+# })
+#
+# single_cell <- harmony::RunHarmony(
+#   object = single_cell,
+#   group.by.vars = "sample",
+#   reduction.use = "pca",
+#   dims.use = analysis_dimensions,
+#   verbose = FALSE
+# )
+#
+# single_cell <- Seurat::RunUMAP(
+#   single_cell,
+#   reduction = "harmony",
+#   dims = analysis_dimensions,
+#   reduction.name = "umap_harmony",
+#   reduction.key = "UMAPharmony_",
+#   seed.use = 1234,
+#   verbose = FALSE
+# )
+
+
+#------------------------------------------------------------------------------
+# 16. Construct nearest-neighbor graph
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Constructing nearest-neighbor graph\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::FindNeighbors(
+  single_cell,
+  reduction = "pca",
+  dims = analysis_dimensions,
+  verbose = FALSE
+)
+
+
+cat(
+  "Nearest-neighbor graph constructed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 17. Cluster cells
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Clustering cells\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::FindClusters(
+  single_cell,
+  resolution = clustering_resolution,
+  random.seed = 1234,
+  verbose = FALSE
+)
+
+
+if (!"seurat_clusters" %in% colnames(
+  single_cell@meta.data
+)) {
+
+  stop(
+    "Seurat clustering did not generate a seurat_clusters column."
+  )
+}
+
+
+number_clusters <- length(
+  unique(
+    single_cell$seurat_clusters
+  )
+)
+
+
+cat(
+  "Clustering completed successfully.\n",
+  "Clusters identified: ",
+  number_clusters,
+  "\n",
+  sep = ""
+)
+
+
+cat(
+  "\nCells per cluster:\n"
+)
+
+
+print(
+  table(
+    single_cell$seurat_clusters
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 18. Generate final UMAP embedding
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Generating final UMAP embedding\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell <- Seurat::RunUMAP(
+  single_cell,
+  reduction = "pca",
+  dims = analysis_dimensions,
+  reduction.name = "umap",
+  reduction.key = "UMAP_",
+  seed.use = 1234,
+  verbose = FALSE
+)
+
+
+if (!"umap" %in% names(
+  single_cell@reductions
+)) {
+
+  stop(
+    "Final UMAP reduction was not created successfully."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 19. Visualize final clustering
+#------------------------------------------------------------------------------
+
+cluster_umap <- Seurat::DimPlot(
+  single_cell,
+  reduction = "umap",
+  group.by = "seurat_clusters",
+  label = TRUE,
+  repel = TRUE
+) +
+  ggplot2::ggtitle(
+    "Seurat Clusters"
+  )
+
+
+sample_umap <- Seurat::DimPlot(
+  single_cell,
+  reduction = "umap",
+  group.by = "sample"
+) +
+  ggplot2::ggtitle(
+    "UMAP by Sample"
+  )
+
+
+condition_umap <- Seurat::DimPlot(
+  single_cell,
+  reduction = "umap",
+  group.by = "condition"
+) +
+  ggplot2::ggtitle(
+    "UMAP by Experimental Condition"
+  )
+
+
+print(
+  cluster_umap
+)
+
+
+print(
+  sample_umap
+)
+
+
+print(
+  condition_umap
+)
+
+
+cluster_umap_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_UMAP_clusters.png"
+)
+
+
+sample_umap_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_UMAP_by_sample.png"
+)
+
+
+condition_umap_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_UMAP_by_condition.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_umap_file,
+  plot = cluster_umap,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+ggplot2::ggsave(
+  filename = sample_umap_file,
+  plot = sample_umap,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+ggplot2::ggsave(
+  filename = condition_umap_file,
+  plot = condition_umap,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 20. Save combined UMAP overview
+#------------------------------------------------------------------------------
+
+umap_overview <- cluster_umap |
+  sample_umap |
+  condition_umap
+
+
+print(
+  umap_overview
+)
+
+
+umap_overview_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_UMAP_overview.png"
+)
+
+
+ggplot2::ggsave(
+  filename = umap_overview_file,
+  plot = umap_overview,
+  width = 18,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 21. Examine cluster composition across samples
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Examining cluster composition across samples\n",
+  "------------------------------------------------------------\n"
+)
+
+
+cluster_counts <- single_cell@meta.data %>%
+  dplyr::count(
+    seurat_clusters,
+    sample,
+    condition,
+    name = "n_cells"
+  )
+
+
+cluster_proportions <- cluster_counts %>%
+  dplyr::group_by(
+    seurat_clusters
+  ) %>%
+  dplyr::mutate(
+    percent_of_cluster =
+      100 *
+      n_cells /
+      sum(
+        n_cells
+      )
+  ) %>%
+  dplyr::ungroup()
+
+
+cat(
+  "\nCluster composition:\n"
+)
+
+
+print(
+  cluster_proportions
+)
+
+
+cluster_composition_file <- file.path(
+  processing_results_directory,
+  "GSE298688_cluster_sample_composition.csv"
+)
+
+
+utils::write.csv(
+  cluster_proportions,
+  cluster_composition_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 22. Generate cluster-composition plot
+#------------------------------------------------------------------------------
+
+cluster_composition_plot <- ggplot2::ggplot(
+  cluster_proportions,
+  ggplot2::aes(
+    x = seurat_clusters,
+    y = percent_of_cluster,
+    fill = sample
+  )
+) +
+  ggplot2::geom_col(
+    width = 0.8
+  ) +
+  ggplot2::labs(
+    title = "Sample Composition of Seurat Clusters",
+    x = "Seurat cluster",
+    y = "Cells within cluster (%)",
+    fill = "Sample"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  cluster_composition_plot
+)
+
+
+cluster_composition_plot_file <- file.path(
+  processing_figure_directory,
+  "GSE298688_cluster_sample_composition.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_composition_plot_file,
+  plot = cluster_composition_plot,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 23. Prepare cluster identities for differential expression
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "Cluster-level differential expression analysis\n",
+  "============================================================\n",
+  "Clusters: ", number_clusters, "\n",
+  "Test: Wilcoxon rank-sum\n",
+  "Minimum detection fraction: ", marker_min_pct, "\n",
+  "log2FC testing threshold: ", marker_log2fc_threshold, "\n",
+  "============================================================\n",
+  sep = ""
+)
+
+
+Seurat::DefaultAssay(
+  single_cell
+) <- "RNA"
+
+
+Seurat::Idents(
+  single_cell
+) <- "seurat_clusters"
+
+
+#------------------------------------------------------------------------------
+# 24. Confirm RNA layers are joined before DEA
+#------------------------------------------------------------------------------
+
+rna_layers_dea <- SeuratObject::Layers(
+  single_cell[["RNA"]]
+)
+
+
+if (
+  sum(
+    grepl(
+      "^data",
+      rna_layers_dea
+    )
+  ) > 1
+) {
+
+  cat(
+    "\nMultiple normalized RNA data layers detected before DEA.\n",
+    "Joining RNA layers...\n",
+    sep = ""
+  )
+
+
+  single_cell <- SeuratObject::JoinLayers(
+    single_cell,
+    assay = "RNA"
+  )
+}
+
+
+cat(
+  "\nRNA layers used for differential expression:\n"
+)
+
+
+print(
+  SeuratObject::Layers(
+    single_cell[["RNA"]]
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 25. Identify cluster marker genes
+#------------------------------------------------------------------------------
+
+cat(
+  "\nRunning FindAllMarkers()...\n"
+)
+
+
+cluster_markers <- Seurat::FindAllMarkers(
+  object = single_cell,
+  assay = "RNA",
+  only.pos = FALSE,
+  min.pct = marker_min_pct,
+  logfc.threshold = marker_log2fc_threshold,
+  test.use = "wilcox",
+  verbose = FALSE
+)
+
+
+if (nrow(cluster_markers) == 0) {
+
+  stop(
+    "No cluster marker genes were identified."
+  )
+}
+
+
+if (!"gene" %in% colnames(
+  cluster_markers
+)) {
+
+  cluster_markers$gene <- rownames(
+    cluster_markers
+  )
+}
+
+
+cat(
+  "Differential expression completed successfully.\n",
+  "Marker results identified: ",
+  nrow(cluster_markers),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 26. Save complete differential-expression results
+#------------------------------------------------------------------------------
+
+cluster_marker_file <- file.path(
+  marker_results_directory,
+  "GSE298688_cluster_markers_all.csv"
+)
+
+
+utils::write.csv(
+  cluster_markers,
+  cluster_marker_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 27. Summarize marker genes by cluster
+#------------------------------------------------------------------------------
+
+marker_summary <- cluster_markers %>%
+  dplyr::group_by(
+    cluster
+  ) %>%
+  dplyr::summarise(
+    total_markers = dplyr::n(),
+
+    positive_markers = sum(
+      avg_log2FC > 0 &
+        p_val_adj < adjusted_p_threshold,
+      na.rm = TRUE
+    ),
+
+    negative_markers = sum(
+      avg_log2FC < 0 &
+        p_val_adj < adjusted_p_threshold,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Marker summary by cluster\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  marker_summary
+)
+
+
+marker_summary_file <- file.path(
+  marker_results_directory,
+  "GSE298688_cluster_marker_summary.csv"
+)
+
+
+utils::write.csv(
+  marker_summary,
+  marker_summary_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 28. Select top positive markers for each cluster
+#------------------------------------------------------------------------------
+
+top_markers <- cluster_markers %>%
+  dplyr::filter(
+    !is.na(
+      p_val_adj
+    ),
+    p_val_adj < adjusted_p_threshold,
+    avg_log2FC > 0
+  ) %>%
+  dplyr::group_by(
+    cluster
+  ) %>%
+  dplyr::slice_max(
+    order_by = avg_log2FC,
+    n = top_markers_per_cluster,
+    with_ties = FALSE
+  ) %>%
+  dplyr::ungroup()
+
+
+if (nrow(top_markers) == 0) {
+
+  stop(
+    "No significant positive cluster markers were available for visualization."
+  )
+}
+
+
+top_marker_file <- file.path(
+  marker_results_directory,
+  "GSE298688_top10_cluster_markers.csv"
+)
+
+
+utils::write.csv(
+  top_markers,
+  top_marker_file,
+  row.names = FALSE
+)
+
+
+cat(
+  "\nTop positive markers selected for ",
+  length(
+    unique(
+      top_markers$cluster
+    )
+  ),
+  " clusters.\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 29. Scale selected marker genes for heatmap visualization
+#------------------------------------------------------------------------------
+
+heatmap_genes <- unique(
+  top_markers$gene
+)
+
+
+heatmap_genes <- intersect(
+  heatmap_genes,
+  rownames(
+    single_cell
+  )
+)
+
+
+if (length(heatmap_genes) == 0) {
+
+  stop(
+    "None of the selected marker genes were found in the Seurat object."
+  )
+}
+
+
+single_cell <- Seurat::ScaleData(
+  single_cell,
+  assay = "RNA",
+  features = heatmap_genes,
+  verbose = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 30. Generate cluster-marker heatmap
+#------------------------------------------------------------------------------
+
+cluster_heatmap <- Seurat::DoHeatmap(
+  single_cell,
+  features = heatmap_genes,
+  group.by = "seurat_clusters",
+  size = 3
+) +
+  Seurat::NoLegend()
+
+
+print(
+  cluster_heatmap
+)
+
+
+cluster_heatmap_file <- file.path(
+  marker_figure_directory,
+  "GSE298688_top10_cluster_marker_heatmap.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_heatmap_file,
+  plot = cluster_heatmap,
+  width = 14,
+  height = 12,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 31. Generate volcano plots for each cluster
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Generating cluster volcano plots\n",
+  "------------------------------------------------------------\n"
+)
+
+
+cluster_ids <- sort(
+  unique(
+    cluster_markers$cluster
+  )
+)
+
+
+volcano_files <- character(
+  length(
+    cluster_ids
+  )
+)
+
+
+for (i in seq_along(
+  cluster_ids
+)) {
+
+  cluster_id <- cluster_ids[i]
+
+
+  cluster_de <- cluster_markers %>%
+    dplyr::filter(
+      cluster == cluster_id
+    ) %>%
+    dplyr::mutate(
+
+      significance = dplyr::case_when(
+
+        !is.na(
+          p_val_adj
+        ) &
+          p_val_adj < adjusted_p_threshold &
+          avg_log2FC >= marker_log2fc_threshold ~
+          "Upregulated",
+
+        !is.na(
+          p_val_adj
+        ) &
+          p_val_adj < adjusted_p_threshold &
+          avg_log2FC <= -marker_log2fc_threshold ~
+          "Downregulated",
+
+        TRUE ~
+          "Not significant"
+      ),
+
+      plot_p = pmax(
+        p_val_adj,
+        .Machine$double.xmin,
+        na.rm = FALSE
+      ),
+
+      neg_log10_p = -log10(
+        plot_p
+      )
+    )
+
+
+  volcano_labels <- cluster_de %>%
+    dplyr::filter(
+      significance == "Upregulated"
+    ) %>%
+    dplyr::slice_max(
+      order_by = avg_log2FC,
+      n = top_markers_per_cluster,
+      with_ties = FALSE
+    )
+
+
+  volcano_plot <- ggplot2::ggplot(
+    cluster_de,
+    ggplot2::aes(
+      x = avg_log2FC,
+      y = neg_log10_p
+    )
+  ) +
+
+    ggplot2::geom_point(
+      ggplot2::aes(
+        color = significance
+      ),
+      alpha = 0.65,
+      size = 1.5
+    ) +
+
+    ggplot2::geom_vline(
+      xintercept = c(
+        -marker_log2fc_threshold,
+        marker_log2fc_threshold
+      ),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+
+    ggplot2::geom_hline(
+      yintercept = -log10(
+        adjusted_p_threshold
+      ),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+
+    ggrepel::geom_text_repel(
+      data = volcano_labels,
+      ggplot2::aes(
+        label = gene
+      ),
+      size = 3.2,
+      box.padding = 0.4,
+      point.padding = 0.2,
+      max.overlaps = Inf,
+      min.segment.length = 0,
+      show.legend = FALSE
+    ) +
+
+    ggplot2::scale_color_manual(
+      values = c(
+        "Upregulated" = "#D73027",
+        "Downregulated" = "#4575B4",
+        "Not significant" = "grey70"
+      )
+    ) +
+
+    ggplot2::labs(
+      title = paste0(
+        "Differential Expression of Seurat Cluster ",
+        cluster_id
+      ),
+      subtitle = "Cluster compared with all remaining cells",
+      x = "Average log2 fold change",
+      y = expression(
+        -log[10](
+          "adjusted p-value"
+        )
+      ),
+      color = NULL
+    ) +
+
+    ggplot2::theme_classic(
+      base_size = 12
+    ) +
+
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        face = "bold",
+        size = 14
+      ),
+      plot.subtitle = ggplot2::element_text(
+        size = 11,
+        color = "grey35"
+      ),
+      axis.title = ggplot2::element_text(
+        face = "bold"
+      ),
+      legend.position = "top",
+      legend.justification = "left"
+    )
+
+
+  print(
+    volcano_plot
+  )
+
+
+  volcano_file <- file.path(
+    volcano_figure_directory,
+    paste0(
+      "GSE298688_cluster_",
+      cluster_id,
+      "_volcano.png"
+    )
+  )
+
+
+  ggplot2::ggsave(
+    filename = volcano_file,
+    plot = volcano_plot,
+    width = 7,
+    height = 6,
+    dpi = 300
+  )
+
+
+  volcano_files[i] <- volcano_file
+}
+
+
+cat(
+  "Volcano plots generated: ",
+  length(
+    volcano_files
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 32. Save analysis parameter table
+#------------------------------------------------------------------------------
+
+analysis_parameters <- data.frame(
+
+  parameter = c(
+    "normalization_method",
+    "normalization_scale_factor",
+    "variable_features",
+    "pca_components",
+    "analysis_dimensions",
+    "clustering_resolution",
+    "batch_correction",
+    "marker_test",
+    "marker_min_pct",
+    "marker_log2fc_threshold",
+    "adjusted_p_threshold",
+    "top_markers_per_cluster"
+  ),
+
+  value = c(
+    "LogNormalize",
+    normalization_scale_factor,
+    number_variable_features,
+    number_pcs,
+    paste0(
+      min(
+        analysis_dimensions
+      ),
+      ":",
+      max(
+        analysis_dimensions
+      )
+    ),
+    clustering_resolution,
+    "None",
+    "Wilcoxon",
+    marker_min_pct,
+    marker_log2fc_threshold,
+    adjusted_p_threshold,
+    top_markers_per_cluster
+  ),
+
+  stringsAsFactors = FALSE
+)
+
+
+analysis_parameter_file <- file.path(
+  processing_results_directory,
+  "GSE298688_processing_parameters.csv"
+)
+
+
+utils::write.csv(
+  analysis_parameters,
+  analysis_parameter_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 33. Validate final processed Seurat object
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating processed Seurat object\n",
+  "------------------------------------------------------------\n"
+)
+
+
+if (!inherits(
+  single_cell,
+  "Seurat"
+)) {
+
+  stop(
+    "Processed object is not a valid Seurat object."
+  )
+}
+
+
+required_reductions <- c(
+  "pca",
+  "umap_uncorrected",
+  "umap"
+)
+
+
+missing_reductions <- setdiff(
+  required_reductions,
+  names(
+    single_cell@reductions
+  )
+)
+
+
+if (length(missing_reductions) > 0) {
+
+  stop(
+    "Required dimensionality reduction(s) missing:\n",
+    paste(
+      missing_reductions,
+      collapse = ", "
+    )
+  )
+}
+
+
+if (!"seurat_clusters" %in% colnames(
+  single_cell@meta.data
+)) {
+
+  stop(
+    "seurat_clusters metadata was not found in the processed object."
+  )
+}
+
+
+if (length(
+  Seurat::VariableFeatures(
+    single_cell
+  )
+) == 0) {
+
+  stop(
+    "Variable features were not retained in the processed object."
+  )
+}
+
+
+if (anyDuplicated(
+  colnames(
+    single_cell
+  )
+) > 0) {
+
+  stop(
+    "Duplicated cell barcodes detected in processed object."
+  )
+}
+
+
+if (anyDuplicated(
+  rownames(
+    single_cell
+  )
+) > 0) {
+
+  stop(
+    "Duplicated gene names detected in processed object."
+  )
+}
+
+
+cat(
+  "Processed Seurat object validation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 34. Save processed Seurat object
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Saving processed Seurat object\n",
+  "------------------------------------------------------------\n"
+)
+
+
+saveRDS(
+  single_cell,
+  processed_object_file
+)
+
+
+if (!file.exists(
+  processed_object_file
+)) {
+
+  stop(
+    "Processed Seurat object was not saved successfully:\n",
+    processed_object_file
+  )
+}
+
+
+cat(
+  "Processed Seurat object saved successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 35. Validate expected Module 03 outputs
+#------------------------------------------------------------------------------
+
+expected_result_files <- c(
+  cluster_composition_file,
+  cluster_marker_file,
+  marker_summary_file,
+  top_marker_file,
+  analysis_parameter_file
+)
+
+
+expected_figure_files <- c(
+  variable_feature_plot_file,
+  elbow_plot_file,
+  pca_sample_plot_file,
+  pca_condition_plot_file,
+  uncorrected_sample_file,
+  uncorrected_condition_file,
+  cluster_umap_file,
+  sample_umap_file,
+  condition_umap_file,
+  umap_overview_file,
+  cluster_composition_plot_file,
+  cluster_heatmap_file,
+  volcano_files
+)
+
+
+missing_result_files <- expected_result_files[
+  !file.exists(
+    expected_result_files
+  )
+]
+
+
+missing_figure_files <- expected_figure_files[
+  !file.exists(
+    expected_figure_files
+  )
+]
+
+
+if (length(
+  missing_result_files
+) > 0) {
+
+  stop(
+    "One or more expected Module 03 result files were not created:\n",
+    paste(
+      missing_result_files,
+      collapse = "\n"
+    )
+  )
+}
+
+
+if (length(
+  missing_figure_files
+) > 0) {
+
+  stop(
+    "One or more expected Module 03 figure files were not created:\n",
+    paste(
+      missing_figure_files,
+      collapse = "\n"
+    )
+  )
+}
+
+
+cat(
+  "All expected Module 03 output files were created successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 36. Final module summary
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "MODULE 03 COMPLETE — Single-cell normalization, clustering, and DEA\n",
+  "============================================================\n",
+  "Cells:                 ", ncol(single_cell), "\n",
+  "Genes:                 ", nrow(single_cell), "\n",
+  "Variable genes:        ",
+  length(
+    Seurat::VariableFeatures(
+      single_cell
+    )
+  ),
+  "\n",
+  "PCA components:        ", number_pcs, "\n",
+  "Dimensions used:       ",
+  min(
+    analysis_dimensions
+  ),
+  ":",
+  max(
+    analysis_dimensions
+  ),
+  "\n",
+  "Clustering resolution: ", clustering_resolution, "\n",
+  "Clusters identified:   ", number_clusters, "\n",
+  "Batch correction:      Not used\n",
+  "Marker results:        ", nrow(cluster_markers), "\n",
+  "Volcano plots:         ", length(volcano_files), "\n",
+  "\n",
+  "Primary output:\n",
+  "  ", processed_object_file, "\n",
+  "\n",
+  "Processing tables:\n",
+  "  ", processing_results_directory, "\n",
+  "\n",
+  "Marker tables:\n",
+  "  ", marker_results_directory, "\n",
+  "\n",
+  "Processing figures:\n",
+  "  ", processing_figure_directory, "\n",
+  "\n",
+  "Marker figures:\n",
+  "  ", marker_figure_directory, "\n",
+  "\n",
+  "Volcano plots:\n",
+  "  ", volcano_figure_directory, "\n",
+  "\n",
+  "Next module:\n",
+  "  04_seurat_singleR.Rmd\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+```

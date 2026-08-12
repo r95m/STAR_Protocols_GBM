@@ -1,0 +1,2820 @@
+---
+title: "Module 04: Single-cell RNA-seq cell-type annotation with SingleR"
+output: html_document
+date: "2026-08-06"
+---
+
+```{r}
+
+#==============================================================================
+# MODULE 04 — SingleR cell-type annotation and marker validation
+#==============================================================================
+
+# Purpose:
+#   Annotate the processed GSE298688 single-cell RNA-seq dataset using the
+#   celldex MouseRNAseqData reference and SingleR. Perform broad and fine
+#   cell-level annotation, cluster-level annotation, map predictions back to
+#   Seurat metadata, compare annotations with unsupervised Seurat clusters,
+#   perform differential expression between broad SingleR cell types,
+#   validate major lineages using canonical marker genes, generate diagnostic
+#   figures and tables, and save the annotated single-cell reference for
+#   downstream CellChat, spatial annotation, and CARD deconvolution.
+#
+# Input:
+#   data/processed/single_cell/
+#     GSE298688_processed_clustered_seurat.rds
+#
+# Primary output object:
+#   data/processed/single_cell/
+#     GSE298688_SingleR_annotated_seurat.rds
+#
+# SingleR prediction objects:
+#   data/processed/single_cell/singleR/
+#     GSE298688_SingleR_cell_level_broad_predictions.rds
+#     GSE298688_SingleR_cell_level_fine_predictions.rds
+#     GSE298688_SingleR_cluster_level_predictions.rds
+#
+# Output tables:
+#   results/single_cell/singleR/
+#   results/single_cell/singleR/cell_type_markers/
+#
+# Output figures:
+#   figures/single_cell/singleR/
+#   figures/single_cell/singleR/diagnostics/
+#   figures/single_cell/singleR/cell_type_markers/
+#   figures/single_cell/singleR/cell_type_markers/volcano_plots/
+#
+# Annotation strategy:
+#   Reference:           celldex MouseRNAseqData
+#   Broad labels:        label.main
+#   Fine labels:         label.fine
+#   Cell-level SingleR:  broad + fine
+#   Cluster SingleR:     broad
+#   Fine tuning:         TRUE
+#   Pruning:             TRUE
+#
+# Cell-type differential expression:
+#   Identity:            SingleR_broad_pruned
+#   Test:                Wilcoxon rank-sum test
+#   Minimum percentage:  0.10
+#   log2FC threshold:    0.25
+#   Adjusted P threshold used for visualization: 0.05
+#
+# Notes:
+#   - "Unassigned" cells represent predictions removed by SingleR pruning.
+#   - Unassigned cells remain in the annotated reference object but are
+#     excluded from cell-type marker discovery.
+#   - Automated SingleR labels should be interpreted together with canonical
+#     markers, cluster-level marker genes, and biological context.
+#   - Cell-type DEA performed here is distinct from treatment-level DEA.
+#==============================================================================
+
+
+#------------------------------------------------------------------------------
+# 1. Load required packages
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(SingleCellExperiment)
+  library(SingleR)
+  library(celldex)
+  library(SummarizedExperiment)
+  library(BiocParallel)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(ggrepel)
+  library(here)
+})
+
+
+#------------------------------------------------------------------------------
+# 2. Reproducibility settings
+#------------------------------------------------------------------------------
+
+set.seed(1234)
+
+
+#------------------------------------------------------------------------------
+# 3. Define analysis parameters
+#------------------------------------------------------------------------------
+
+singleR_fine_tune <- TRUE
+
+singleR_prune <- TRUE
+
+minimum_shared_genes <- 1000
+
+marker_min_pct <- 0.10
+
+marker_log2fc_threshold <- 0.25
+
+adjusted_p_threshold <- 0.05
+
+top_markers_per_cell_type <- 10
+
+
+#------------------------------------------------------------------------------
+# 4. Define repository paths
+#------------------------------------------------------------------------------
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell"
+)
+
+
+singleR_object_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell",
+  "singleR"
+)
+
+
+singleR_results_directory <- here::here(
+  "results",
+  "single_cell",
+  "singleR"
+)
+
+
+celltype_marker_results_directory <- here::here(
+  "results",
+  "single_cell",
+  "singleR",
+  "cell_type_markers"
+)
+
+
+singleR_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "singleR"
+)
+
+
+diagnostic_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "singleR",
+  "diagnostics"
+)
+
+
+celltype_marker_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "singleR",
+  "cell_type_markers"
+)
+
+
+celltype_volcano_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "singleR",
+  "cell_type_markers",
+  "volcano_plots"
+)
+
+
+directories_to_create <- c(
+  processed_directory,
+  singleR_object_directory,
+  singleR_results_directory,
+  celltype_marker_results_directory,
+  singleR_figure_directory,
+  diagnostic_figure_directory,
+  celltype_marker_figure_directory,
+  celltype_volcano_figure_directory
+)
+
+
+for (directory in directories_to_create) {
+
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+
+input_file <- file.path(
+  processed_directory,
+  "GSE298688_processed_clustered_seurat.rds"
+)
+
+
+annotated_object_file <- file.path(
+  processed_directory,
+  "GSE298688_SingleR_annotated_seurat.rds"
+)
+
+
+broad_prediction_file <- file.path(
+  singleR_object_directory,
+  "GSE298688_SingleR_cell_level_broad_predictions.rds"
+)
+
+
+fine_prediction_file <- file.path(
+  singleR_object_directory,
+  "GSE298688_SingleR_cell_level_fine_predictions.rds"
+)
+
+
+cluster_prediction_file <- file.path(
+  singleR_object_directory,
+  "GSE298688_SingleR_cluster_level_predictions.rds"
+)
+
+
+cat(
+  "\n============================================================\n",
+  "MODULE 04 — SingleR cell-type annotation\n",
+  "============================================================\n",
+  "Repository root:       ", here::here(), "\n",
+  "Input object:          ", input_file, "\n",
+  "Processed data:        ", processed_directory, "\n",
+  "SingleR objects:       ", singleR_object_directory, "\n",
+  "SingleR results:       ", singleR_results_directory, "\n",
+  "SingleR figures:       ", singleR_figure_directory, "\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Validate and load Module 03 output
+#------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+
+  stop(
+    "Module 03 output was not found:\n",
+    input_file,
+    "\n\nRun 03_seurat_normalization_n_dea.Rmd before Module 04."
+  )
+}
+
+
+cat(
+  "Loading processed single-cell Seurat object...\n"
+)
+
+
+single_cell <- readRDS(
+  input_file
+)
+
+
+if (!inherits(
+  single_cell,
+  "Seurat"
+)) {
+
+  stop(
+    "Loaded input file is not a valid Seurat object."
+  )
+}
+
+
+if (!"RNA" %in% Seurat::Assays(
+  single_cell
+)) {
+
+  stop(
+    "RNA assay was not found in the input Seurat object."
+  )
+}
+
+
+Seurat::DefaultAssay(
+  single_cell
+) <- "RNA"
+
+
+required_metadata <- c(
+  "sample",
+  "condition",
+  "seurat_clusters"
+)
+
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(
+    single_cell@meta.data
+  )
+)
+
+
+if (length(
+  missing_metadata
+) > 0) {
+
+  stop(
+    "Required metadata column(s) missing from input object:\n",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+
+if (!"umap" %in% names(
+  single_cell@reductions
+)) {
+
+  stop(
+    "UMAP reduction was not found. Run Module 03 before SingleR annotation."
+  )
+}
+
+
+cat(
+  "Object loaded successfully:\n",
+  "  Genes:    ", nrow(single_cell), "\n",
+  "  Cells:    ", ncol(single_cell), "\n",
+  "  Samples:  ",
+  length(
+    unique(
+      single_cell$sample
+    )
+  ),
+  "\n",
+  "  Clusters: ",
+  length(
+    unique(
+      single_cell$seurat_clusters
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Inspect and validate normalized RNA expression
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Inspecting normalized RNA expression\n",
+  "------------------------------------------------------------\n"
+)
+
+
+rna_layers <- SeuratObject::Layers(
+  single_cell[["RNA"]]
+)
+
+
+cat(
+  "RNA assay layers:\n"
+)
+
+
+print(
+  rna_layers
+)
+
+
+if (
+  sum(
+    grepl(
+      "^data",
+      rna_layers
+    )
+  ) > 1
+) {
+
+  cat(
+    "\nMultiple normalized RNA data layers detected.\n",
+    "Joining RNA layers before SingleR annotation...\n",
+    sep = ""
+  )
+
+
+  single_cell <- SeuratObject::JoinLayers(
+    single_cell,
+    assay = "RNA"
+  )
+}
+
+
+if (!"data" %in% SeuratObject::Layers(
+  single_cell[["RNA"]]
+)) {
+
+  stop(
+    paste(
+      "Normalized RNA data layer was not found.",
+      "Run NormalizeData() in Module 03 before SingleR annotation."
+    )
+  )
+}
+
+
+normalized_expression <- Seurat::GetAssayData(
+  object = single_cell,
+  assay = "RNA",
+  layer = "data"
+)
+
+
+if (
+  nrow(
+    normalized_expression
+  ) == 0 ||
+  ncol(
+    normalized_expression
+  ) == 0
+) {
+
+  stop(
+    "Normalized RNA expression matrix is empty."
+  )
+}
+
+
+cat(
+  "Normalized RNA expression detected:\n",
+  "  Genes: ", nrow(normalized_expression), "\n",
+  "  Cells: ", ncol(normalized_expression), "\n",
+  sep = ""
+)
+
+
+rm(
+  normalized_expression
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Confirm mouse-style gene symbols
+#------------------------------------------------------------------------------
+
+mouse_marker_check <- c(
+  "Cd3d",
+  "P2ry12",
+  "Csf1r",
+  "Aif1",
+  "Gfap"
+)
+
+
+human_marker_check <- c(
+  "CD3D",
+  "P2RY12",
+  "CSF1R",
+  "AIF1",
+  "GFAP"
+)
+
+
+mouse_markers_detected <- intersect(
+  mouse_marker_check,
+  rownames(
+    single_cell
+  )
+)
+
+
+human_markers_detected <- intersect(
+  human_marker_check,
+  rownames(
+    single_cell
+  )
+)
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Gene-symbol species check\n",
+  "------------------------------------------------------------\n",
+  "Mouse-style markers detected: ",
+  paste(
+    mouse_markers_detected,
+    collapse = ", "
+  ),
+  "\n",
+  "Human-style markers detected: ",
+  paste(
+    human_markers_detected,
+    collapse = ", "
+  ),
+  "\n",
+  sep = ""
+)
+
+
+if (
+  length(
+    mouse_markers_detected
+  ) == 0
+) {
+
+  warning(
+    paste(
+      "No expected mouse-style marker symbols were detected.",
+      "Confirm species and gene-symbol format before interpreting SingleR."
+    )
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 8. Load celldex MouseRNAseqData reference
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Loading celldex MouseRNAseqData reference\n",
+  "------------------------------------------------------------\n"
+)
+
+
+mouse_reference <- celldex::MouseRNAseqData()
+
+
+if (
+  nrow(
+    mouse_reference
+  ) == 0 ||
+  ncol(
+    mouse_reference
+  ) == 0
+) {
+
+  stop(
+    "MouseRNAseqData reference was empty."
+  )
+}
+
+
+if (
+  !"label.main" %in% colnames(
+    SummarizedExperiment::colData(
+      mouse_reference
+    )
+  ) ||
+  !"label.fine" %in% colnames(
+    SummarizedExperiment::colData(
+      mouse_reference
+    )
+  )
+) {
+
+  stop(
+    "Expected label.main or label.fine metadata was not found in reference."
+  )
+}
+
+
+cat(
+  "Reference loaded successfully:\n",
+  "  Reference samples: ", ncol(mouse_reference), "\n",
+  "  Reference genes:   ", nrow(mouse_reference), "\n",
+  "  Broad cell types:  ",
+  length(
+    unique(
+      mouse_reference$label.main
+    )
+  ),
+  "\n",
+  "  Fine cell types:   ",
+  length(
+    unique(
+      mouse_reference$label.fine
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 9. Convert Seurat object to SingleCellExperiment
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Converting Seurat object to SingleCellExperiment\n",
+  "------------------------------------------------------------\n"
+)
+
+
+single_cell_sce <- Seurat::as.SingleCellExperiment(
+  x = single_cell,
+  assay = "RNA"
+)
+
+
+sce_assays <- SummarizedExperiment::assayNames(
+  single_cell_sce
+)
+
+
+cat(
+  "SingleCellExperiment assays:\n"
+)
+
+
+print(
+  sce_assays
+)
+
+
+if (!"logcounts" %in% sce_assays) {
+
+  stop(
+    paste(
+      "The converted SingleCellExperiment does not contain a",
+      "'logcounts' assay required for SingleR."
+    )
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 10. Examine query-reference gene overlap
+#------------------------------------------------------------------------------
+
+shared_genes <- intersect(
+  rownames(
+    single_cell_sce
+  ),
+  rownames(
+    mouse_reference
+  )
+)
+
+
+gene_overlap_percent <- 100 *
+  length(
+    shared_genes
+  ) /
+  nrow(
+    single_cell_sce
+  )
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Query-reference gene overlap\n",
+  "------------------------------------------------------------\n",
+  "Shared genes: ",
+  length(
+    shared_genes
+  ),
+  "\n",
+  "Query genes represented in reference: ",
+  round(
+    gene_overlap_percent,
+    1
+  ),
+  "%\n",
+  sep = ""
+)
+
+
+if (
+  length(
+    shared_genes
+  ) < minimum_shared_genes
+) {
+
+  warning(
+    paste(
+      "Fewer than",
+      minimum_shared_genes,
+      "genes overlap between query and reference.",
+      "Check species and gene identifiers."
+    )
+  )
+}
+
+
+gene_overlap_table <- data.frame(
+  query_genes = nrow(
+    single_cell_sce
+  ),
+  reference_genes = nrow(
+    mouse_reference
+  ),
+  shared_genes = length(
+    shared_genes
+  ),
+  query_overlap_percent = gene_overlap_percent
+)
+
+
+gene_overlap_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_query_reference_gene_overlap.csv"
+)
+
+
+utils::write.csv(
+  gene_overlap_table,
+  gene_overlap_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 11. Run broad cell-level SingleR annotation
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Running broad cell-level SingleR annotation\n",
+  "------------------------------------------------------------\n"
+)
+
+
+singleR_broad <- SingleR::SingleR(
+  test = single_cell_sce,
+  ref = mouse_reference,
+  labels = mouse_reference$label.main,
+  assay.type.test = "logcounts",
+  assay.type.ref = "logcounts",
+  fine.tune = singleR_fine_tune,
+  prune = singleR_prune,
+  BPPARAM = BiocParallel::SerialParam()
+)
+
+
+cat(
+  "Broad cell-level SingleR annotation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 12. Run fine cell-level SingleR annotation
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Running fine cell-level SingleR annotation\n",
+  "------------------------------------------------------------\n"
+)
+
+
+singleR_fine <- SingleR::SingleR(
+  test = single_cell_sce,
+  ref = mouse_reference,
+  labels = mouse_reference$label.fine,
+  assay.type.test = "logcounts",
+  assay.type.ref = "logcounts",
+  fine.tune = singleR_fine_tune,
+  prune = singleR_prune,
+  BPPARAM = BiocParallel::SerialParam()
+)
+
+
+cat(
+  "Fine cell-level SingleR annotation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 13. Validate SingleR prediction barcodes
+#------------------------------------------------------------------------------
+
+if (
+  !setequal(
+    rownames(
+      singleR_broad
+    ),
+    colnames(
+      single_cell
+    )
+  )
+) {
+
+  stop(
+    "Broad SingleR prediction barcodes do not match Seurat cell barcodes."
+  )
+}
+
+
+if (
+  !setequal(
+    rownames(
+      singleR_fine
+    ),
+    colnames(
+      single_cell
+    )
+  )
+) {
+
+  stop(
+    "Fine SingleR prediction barcodes do not match Seurat cell barcodes."
+  )
+}
+
+
+singleR_broad <- singleR_broad[
+  colnames(
+    single_cell
+  ),
+]
+
+
+singleR_fine <- singleR_fine[
+  colnames(
+    single_cell
+  ),
+]
+
+
+if (
+  !identical(
+    rownames(
+      singleR_broad
+    ),
+    colnames(
+      single_cell
+    )
+  ) ||
+  !identical(
+    rownames(
+      singleR_fine
+    ),
+    colnames(
+      single_cell
+    )
+  )
+) {
+
+  stop(
+    "SingleR predictions could not be reordered to match Seurat cell order."
+  )
+}
+
+
+cat(
+  "SingleR prediction barcodes match Seurat cells exactly.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 14. Add cell-level SingleR predictions to Seurat metadata
+#------------------------------------------------------------------------------
+
+singleR_metadata <- data.frame(
+
+  SingleR_broad_label =
+    singleR_broad$labels,
+
+  SingleR_broad_pruned =
+    singleR_broad$pruned.labels,
+
+  SingleR_broad_delta =
+    singleR_broad$delta.next,
+
+  SingleR_fine_label =
+    singleR_fine$labels,
+
+  SingleR_fine_pruned =
+    singleR_fine$pruned.labels,
+
+  SingleR_fine_delta =
+    singleR_fine$delta.next,
+
+  row.names = colnames(
+    single_cell
+  ),
+
+  stringsAsFactors = FALSE
+)
+
+
+singleR_metadata$SingleR_broad_pruned[
+  is.na(
+    singleR_metadata$SingleR_broad_pruned
+  )
+] <- "Unassigned"
+
+
+singleR_metadata$SingleR_fine_pruned[
+  is.na(
+    singleR_metadata$SingleR_fine_pruned
+  )
+] <- "Unassigned"
+
+
+single_cell <- Seurat::AddMetaData(
+  object = single_cell,
+  metadata = singleR_metadata
+)
+
+
+#------------------------------------------------------------------------------
+# 15. Summarize cell-level annotations
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Broad SingleR annotation summary\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  table(
+    single_cell$SingleR_broad_pruned,
+    useNA = "ifany"
+  )
+)
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Fine SingleR annotation summary\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  table(
+    single_cell$SingleR_fine_pruned,
+    useNA = "ifany"
+  )
+)
+
+
+broad_unassigned_percent <- mean(
+  single_cell$SingleR_broad_pruned ==
+    "Unassigned"
+) * 100
+
+
+fine_unassigned_percent <- mean(
+  single_cell$SingleR_fine_pruned ==
+    "Unassigned"
+) * 100
+
+
+cat(
+  "\nUnassigned cells after pruning:\n",
+  "  Broad annotation: ",
+  round(
+    broad_unassigned_percent,
+    2
+  ),
+  "%\n",
+  "  Fine annotation:  ",
+  round(
+    fine_unassigned_percent,
+    2
+  ),
+  "%\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 16. Create cell-level SingleR UMAP plots
+#------------------------------------------------------------------------------
+
+singleR_broad_umap <- Seurat::DimPlot(
+  object = single_cell,
+  reduction = "umap",
+  group.by = "SingleR_broad_pruned",
+  label = TRUE,
+  repel = TRUE,
+  label.size = 3
+) +
+  ggplot2::ggtitle(
+    "SingleR Broad Cell-Type Annotation"
+  )
+
+
+singleR_fine_umap <- Seurat::DimPlot(
+  object = single_cell,
+  reduction = "umap",
+  group.by = "SingleR_fine_pruned",
+  label = TRUE,
+  repel = TRUE,
+  label.size = 3
+) +
+  ggplot2::ggtitle(
+    "SingleR Fine Cell-Type Annotation"
+  )
+
+
+print(
+  singleR_broad_umap
+)
+
+
+print(
+  singleR_fine_umap
+)
+
+
+broad_umap_file <- file.path(
+  singleR_figure_directory,
+  "GSE298688_SingleR_broad_cell_level_UMAP.png"
+)
+
+
+fine_umap_file <- file.path(
+  singleR_figure_directory,
+  "GSE298688_SingleR_fine_cell_level_UMAP.png"
+)
+
+
+ggplot2::ggsave(
+  filename = broad_umap_file,
+  plot = singleR_broad_umap,
+  width = 8,
+  height = 7,
+  dpi = 300
+)
+
+
+ggplot2::ggsave(
+  filename = fine_umap_file,
+  plot = singleR_fine_umap,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 17. Compare cell-level SingleR predictions with Seurat clusters
+#------------------------------------------------------------------------------
+
+broad_cluster_table <- table(
+  Cluster = single_cell$seurat_clusters,
+  SingleR = single_cell$SingleR_broad_pruned
+)
+
+
+fine_cluster_table <- table(
+  Cluster = single_cell$seurat_clusters,
+  SingleR = single_cell$SingleR_fine_pruned
+)
+
+
+broad_cluster_proportions <- prop.table(
+  broad_cluster_table,
+  margin = 1
+)
+
+
+fine_cluster_proportions <- prop.table(
+  fine_cluster_table,
+  margin = 1
+)
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Broad annotation by Seurat cluster\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  broad_cluster_table
+)
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Fine annotation by Seurat cluster\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  fine_cluster_table
+)
+
+
+broad_cluster_count_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_broad_by_cluster_counts.csv"
+)
+
+
+fine_cluster_count_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_fine_by_cluster_counts.csv"
+)
+
+
+broad_cluster_proportion_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_broad_by_cluster_proportions.csv"
+)
+
+
+fine_cluster_proportion_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_fine_by_cluster_proportions.csv"
+)
+
+
+utils::write.csv(
+  as.data.frame.matrix(
+    broad_cluster_table
+  ),
+  broad_cluster_count_file
+)
+
+
+utils::write.csv(
+  as.data.frame.matrix(
+    fine_cluster_table
+  ),
+  fine_cluster_count_file
+)
+
+
+utils::write.csv(
+  as.data.frame.matrix(
+    round(
+      broad_cluster_proportions,
+      4
+    )
+  ),
+  broad_cluster_proportion_file
+)
+
+
+utils::write.csv(
+  as.data.frame.matrix(
+    round(
+      fine_cluster_proportions,
+      4
+    )
+  ),
+  fine_cluster_proportion_file
+)
+
+
+#------------------------------------------------------------------------------
+# 18. Run cluster-level SingleR annotation
+#------------------------------------------------------------------------------
+
+cluster_ids <- as.character(
+  single_cell$seurat_clusters
+)
+
+
+names(
+  cluster_ids
+) <- colnames(
+  single_cell
+)
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Running cluster-level SingleR annotation\n",
+  "------------------------------------------------------------\n"
+)
+
+
+singleR_cluster <- SingleR::SingleR(
+  test = single_cell_sce,
+  ref = mouse_reference,
+  labels = mouse_reference$label.main,
+  clusters = cluster_ids,
+  assay.type.test = "logcounts",
+  assay.type.ref = "logcounts",
+  fine.tune = singleR_fine_tune,
+  prune = singleR_prune,
+  BPPARAM = BiocParallel::SerialParam()
+)
+
+
+cat(
+  "Cluster-level SingleR annotation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 19. Map cluster-level predictions back to individual cells
+#------------------------------------------------------------------------------
+
+cluster_label_map <- stats::setNames(
+  as.character(
+    singleR_cluster$labels
+  ),
+  rownames(
+    singleR_cluster
+  )
+)
+
+
+cluster_pruned_map <- stats::setNames(
+  as.character(
+    singleR_cluster$pruned.labels
+  ),
+  rownames(
+    singleR_cluster
+  )
+)
+
+
+cell_cluster_ids <- as.character(
+  single_cell$seurat_clusters
+)
+
+
+cell_cluster_labels <- unname(
+  cluster_label_map[
+    cell_cluster_ids
+  ]
+)
+
+
+cell_cluster_pruned <- unname(
+  cluster_pruned_map[
+    cell_cluster_ids
+  ]
+)
+
+
+if (
+  length(
+    cell_cluster_labels
+  ) != ncol(
+    single_cell
+  ) ||
+  length(
+    cell_cluster_pruned
+  ) != ncol(
+    single_cell
+  )
+) {
+
+  stop(
+    "Cluster-level SingleR predictions could not be mapped to all cells."
+  )
+}
+
+
+cell_cluster_pruned[
+  is.na(
+    cell_cluster_pruned
+  )
+] <- "Unassigned"
+
+
+single_cell$SingleR_cluster_label <-
+  cell_cluster_labels
+
+
+single_cell$SingleR_cluster_pruned <-
+  cell_cluster_pruned
+
+
+#------------------------------------------------------------------------------
+# 20. Save cluster-level annotation summary
+#------------------------------------------------------------------------------
+
+cluster_annotation_summary <- data.frame(
+  cluster = rownames(
+    singleR_cluster
+  ),
+  label = singleR_cluster$labels,
+  pruned_label = singleR_cluster$pruned.labels,
+  stringsAsFactors = FALSE
+)
+
+
+cluster_annotation_summary$pruned_label[
+  is.na(
+    cluster_annotation_summary$pruned_label
+  )
+] <- "Unassigned"
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Cluster-level SingleR predictions\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  cluster_annotation_summary
+)
+
+
+cluster_annotation_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_cluster_level_predictions.csv"
+)
+
+
+utils::write.csv(
+  cluster_annotation_summary,
+  cluster_annotation_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 21. Create cluster-level SingleR UMAP
+#------------------------------------------------------------------------------
+
+singleR_cluster_umap <- Seurat::DimPlot(
+  object = single_cell,
+  reduction = "umap",
+  group.by = "SingleR_cluster_pruned",
+  label = TRUE,
+  repel = TRUE,
+  label.size = 3
+) +
+  ggplot2::ggtitle(
+    "SingleR Cluster-Level Cell-Type Annotation"
+  )
+
+
+print(
+  singleR_cluster_umap
+)
+
+
+cluster_umap_file <- file.path(
+  singleR_figure_directory,
+  "GSE298688_SingleR_cluster_level_UMAP.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_umap_file,
+  plot = singleR_cluster_umap,
+  width = 8,
+  height = 7,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 22. Create annotation diagnostic tables
+#------------------------------------------------------------------------------
+
+broad_cell_type_counts <- single_cell@meta.data %>%
+  dplyr::count(
+    SingleR_broad_pruned,
+    name = "cells"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(
+      cells
+    )
+  )
+
+
+fine_cell_type_counts <- single_cell@meta.data %>%
+  dplyr::count(
+    SingleR_fine_pruned,
+    name = "cells"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(
+      cells
+    )
+  )
+
+
+broad_cluster_counts <- single_cell@meta.data %>%
+  dplyr::count(
+    seurat_clusters,
+    SingleR_broad_pruned,
+    name = "cells"
+  )
+
+
+broad_cluster_percent <- broad_cluster_counts %>%
+  dplyr::group_by(
+    seurat_clusters
+  ) %>%
+  dplyr::mutate(
+    percent = 100 *
+      cells /
+      sum(
+        cells
+      )
+  ) %>%
+  dplyr::ungroup()
+
+
+broad_cell_type_count_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_broad_cell_type_counts.csv"
+)
+
+
+fine_cell_type_count_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_fine_cell_type_counts.csv"
+)
+
+
+broad_cluster_percent_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_broad_cell_types_by_cluster.csv"
+)
+
+
+utils::write.csv(
+  broad_cell_type_counts,
+  broad_cell_type_count_file,
+  row.names = FALSE
+)
+
+
+utils::write.csv(
+  fine_cell_type_counts,
+  fine_cell_type_count_file,
+  row.names = FALSE
+)
+
+
+utils::write.csv(
+  broad_cluster_percent,
+  broad_cluster_percent_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 23. Plot total cells per broad SingleR cell type
+#------------------------------------------------------------------------------
+
+broad_cell_count_plot <- ggplot2::ggplot(
+  broad_cell_type_counts,
+  ggplot2::aes(
+    x = reorder(
+      SingleR_broad_pruned,
+      cells
+    ),
+    y = cells
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Broad SingleR Cell-Type Distribution",
+    x = "Cell type",
+    y = "Number of cells"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  broad_cell_count_plot
+)
+
+
+broad_cell_count_plot_file <- file.path(
+  diagnostic_figure_directory,
+  "GSE298688_SingleR_broad_cell_type_counts.png"
+)
+
+
+ggplot2::ggsave(
+  filename = broad_cell_count_plot_file,
+  plot = broad_cell_count_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 24. Plot total cells per fine SingleR cell type
+#------------------------------------------------------------------------------
+
+fine_cell_count_plot <- ggplot2::ggplot(
+  fine_cell_type_counts,
+  ggplot2::aes(
+    x = reorder(
+      SingleR_fine_pruned,
+      cells
+    ),
+    y = cells
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Fine SingleR Cell-Type Distribution",
+    x = "Cell type",
+    y = "Number of cells"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  fine_cell_count_plot
+)
+
+
+fine_cell_count_plot_file <- file.path(
+  diagnostic_figure_directory,
+  "GSE298688_SingleR_fine_cell_type_counts.png"
+)
+
+
+ggplot2::ggsave(
+  filename = fine_cell_count_plot_file,
+  plot = fine_cell_count_plot,
+  width = 9,
+  height = 8,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 25. Plot SingleR composition within Seurat clusters
+#------------------------------------------------------------------------------
+
+cluster_cell_type_plot <- ggplot2::ggplot(
+  broad_cluster_percent,
+  ggplot2::aes(
+    x = seurat_clusters,
+    y = percent,
+    fill = SingleR_broad_pruned
+  )
+) +
+  ggplot2::geom_col(
+    width = 0.8
+  ) +
+  ggplot2::labs(
+    title = "SingleR Cell-Type Composition of Seurat Clusters",
+    x = "Seurat cluster",
+    y = "Cells within cluster (%)",
+    fill = "SingleR cell type"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    legend.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  cluster_cell_type_plot
+)
+
+
+cluster_cell_type_plot_file <- file.path(
+  diagnostic_figure_directory,
+  "GSE298688_SingleR_cell_types_by_cluster.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_cell_type_plot_file,
+  plot = cluster_cell_type_plot,
+  width = 12,
+  height = 7,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 26. Plot cell counts across Seurat clusters
+#------------------------------------------------------------------------------
+
+cluster_size_counts <- single_cell@meta.data %>%
+  dplyr::count(
+    seurat_clusters,
+    name = "cells"
+  )
+
+
+cluster_size_plot <- ggplot2::ggplot(
+  cluster_size_counts,
+  ggplot2::aes(
+    x = seurat_clusters,
+    y = cells
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::labs(
+    title = "Cell Counts Across Seurat Clusters",
+    x = "Seurat cluster",
+    y = "Number of cells"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  cluster_size_plot
+)
+
+
+cluster_size_plot_file <- file.path(
+  diagnostic_figure_directory,
+  "GSE298688_Seurat_cluster_cell_counts.png"
+)
+
+
+ggplot2::ggsave(
+  filename = cluster_size_plot_file,
+  plot = cluster_size_plot,
+  width = 9,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 27. Create combined SingleR annotation overview
+#------------------------------------------------------------------------------
+
+singleR_annotation_overview <- (
+  singleR_broad_umap |
+    singleR_fine_umap |
+    singleR_cluster_umap
+)
+
+
+annotation_overview_file <- file.path(
+  singleR_figure_directory,
+  "GSE298688_SingleR_annotation_overview.png"
+)
+
+
+ggplot2::ggsave(
+  filename = annotation_overview_file,
+  plot = singleR_annotation_overview,
+  width = 24,
+  height = 7,
+  dpi = 300
+)
+
+
+cat(
+  "\nCombined SingleR annotation overview saved.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 28. Perform canonical marker validation
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Canonical marker validation\n",
+  "------------------------------------------------------------\n"
+)
+
+
+canonical_markers <- c(
+
+  # Myeloid / microglia
+  "Aif1",
+  "Csf1r",
+  "P2ry12",
+
+  # T cells
+  "Cd3d",
+  "Cd3e",
+
+  # B cells
+  "Cd79a",
+  "Ms4a1",
+
+  # Endothelial cells
+  "Pecam1",
+  "Kdr",
+
+  # Astrocytes
+  "Gfap",
+  "Aldoc",
+
+  # Oligodendrocyte lineage
+  "Olig1",
+  "Olig2",
+  "Mbp"
+)
+
+
+canonical_markers_present <- intersect(
+  canonical_markers,
+  rownames(
+    single_cell
+  )
+)
+
+
+cat(
+  "Canonical markers detected: ",
+  length(
+    canonical_markers_present
+  ),
+  " / ",
+  length(
+    canonical_markers
+  ),
+  "\n",
+  sep = ""
+)
+
+
+if (
+  length(
+    canonical_markers_present
+  ) == 0
+) {
+
+  stop(
+    "None of the predefined canonical marker genes were found."
+  )
+}
+
+
+marker_dotplot <- Seurat::DotPlot(
+  single_cell,
+  features = canonical_markers_present,
+  group.by = "SingleR_broad_pruned"
+) +
+  Seurat::RotatedAxis() +
+  ggplot2::labs(
+    title = "Canonical Marker Expression Across SingleR Cell Types",
+    x = "Canonical marker",
+    y = "SingleR cell type"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      face = "bold"
+    ),
+    axis.title = ggplot2::element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  marker_dotplot
+)
+
+
+canonical_marker_plot_file <- file.path(
+  diagnostic_figure_directory,
+  "GSE298688_SingleR_canonical_marker_dotplot.png"
+)
+
+
+ggplot2::ggsave(
+  filename = canonical_marker_plot_file,
+  plot = marker_dotplot,
+  width = 11,
+  height = 7,
+  dpi = 300
+)
+
+
+#==============================================================================
+# SingleR cell-type differential expression
+#==============================================================================
+
+
+#------------------------------------------------------------------------------
+# 29. Prepare confidently annotated cells for cell-type DEA
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "SingleR broad cell-type differential expression\n",
+  "============================================================\n"
+)
+
+
+annotation_column <- "SingleR_broad_pruned"
+
+
+if (!annotation_column %in% colnames(
+  single_cell@meta.data
+)) {
+
+  stop(
+    "SingleR annotation column was not found: ",
+    annotation_column
+  )
+}
+
+
+single_cell_de <- subset(
+  single_cell,
+  subset = SingleR_broad_pruned != "Unassigned"
+)
+
+
+if (
+  ncol(
+    single_cell_de
+  ) == 0
+) {
+
+  stop(
+    "No confidently annotated cells remained for cell-type DEA."
+  )
+}
+
+
+cat(
+  "Cells included in cell-type DEA: ",
+  ncol(
+    single_cell_de
+  ),
+  "\n",
+  "Unassigned cells excluded: ",
+  ncol(
+    single_cell
+  ) -
+    ncol(
+      single_cell_de
+    ),
+  "\n",
+  sep = ""
+)
+
+
+Seurat::DefaultAssay(
+  single_cell_de
+) <- "RNA"
+
+
+Seurat::Idents(
+  single_cell_de
+) <- annotation_column
+
+
+cell_type_counts <- table(
+  Seurat::Idents(
+    single_cell_de
+  )
+)
+
+
+cat(
+  "\nCell counts by SingleR broad cell type:\n"
+)
+
+
+print(
+  cell_type_counts
+)
+
+
+#------------------------------------------------------------------------------
+# 30. Confirm RNA layers are joined before cell-type DEA
+#------------------------------------------------------------------------------
+
+rna_layers_dea <- SeuratObject::Layers(
+  single_cell_de[["RNA"]]
+)
+
+
+if (
+  sum(
+    grepl(
+      "^data",
+      rna_layers_dea
+    )
+  ) > 1
+) {
+
+  single_cell_de <- SeuratObject::JoinLayers(
+    single_cell_de,
+    assay = "RNA"
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 31. Identify differentially expressed genes by SingleR cell type
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Running FindAllMarkers() by SingleR broad cell type\n",
+  "------------------------------------------------------------\n"
+)
+
+
+singleR_celltype_markers <- Seurat::FindAllMarkers(
+  object = single_cell_de,
+  assay = "RNA",
+  only.pos = FALSE,
+  min.pct = marker_min_pct,
+  logfc.threshold = marker_log2fc_threshold,
+  test.use = "wilcox",
+  verbose = FALSE
+)
+
+
+if (
+  nrow(
+    singleR_celltype_markers
+  ) == 0
+) {
+
+  stop(
+    "No SingleR cell-type marker genes were identified."
+  )
+}
+
+
+if (!"gene" %in% colnames(
+  singleR_celltype_markers
+)) {
+
+  singleR_celltype_markers$gene <- rownames(
+    singleR_celltype_markers
+  )
+}
+
+
+cat(
+  "Cell-type differential expression completed successfully.\n",
+  "Marker results identified: ",
+  nrow(
+    singleR_celltype_markers
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 32. Save complete cell-type differential-expression results
+#------------------------------------------------------------------------------
+
+celltype_marker_file <- file.path(
+  celltype_marker_results_directory,
+  "GSE298688_SingleR_broad_cell_type_markers_all.csv"
+)
+
+
+utils::write.csv(
+  singleR_celltype_markers,
+  celltype_marker_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 33. Summarize marker genes by SingleR cell type
+#------------------------------------------------------------------------------
+
+singleR_marker_summary <- singleR_celltype_markers %>%
+  dplyr::group_by(
+    cluster
+  ) %>%
+  dplyr::summarise(
+
+    total_markers = dplyr::n(),
+
+    positive_markers = sum(
+      avg_log2FC > 0 &
+        p_val_adj < adjusted_p_threshold,
+      na.rm = TRUE
+    ),
+
+    negative_markers = sum(
+      avg_log2FC < 0 &
+        p_val_adj < adjusted_p_threshold,
+      na.rm = TRUE
+    ),
+
+    .groups = "drop"
+  )
+
+
+colnames(
+  singleR_marker_summary
+)[
+  colnames(
+    singleR_marker_summary
+  ) == "cluster"
+] <- "cell_type"
+
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Marker summary by SingleR cell type\n",
+  "------------------------------------------------------------\n"
+)
+
+
+print(
+  singleR_marker_summary
+)
+
+
+celltype_marker_summary_file <- file.path(
+  celltype_marker_results_directory,
+  "GSE298688_SingleR_broad_cell_type_marker_summary.csv"
+)
+
+
+utils::write.csv(
+  singleR_marker_summary,
+  celltype_marker_summary_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 34. Select top positive markers for each cell type
+#------------------------------------------------------------------------------
+
+singleR_top_markers <- singleR_celltype_markers %>%
+  dplyr::filter(
+    !is.na(
+      p_val_adj
+    ),
+    p_val_adj < adjusted_p_threshold,
+    avg_log2FC > 0
+  ) %>%
+  dplyr::group_by(
+    cluster
+  ) %>%
+  dplyr::slice_max(
+    order_by = avg_log2FC,
+    n = top_markers_per_cell_type,
+    with_ties = FALSE
+  ) %>%
+  dplyr::ungroup()
+
+
+if (
+  nrow(
+    singleR_top_markers
+  ) == 0
+) {
+
+  stop(
+    "No significant positive SingleR cell-type markers were available."
+  )
+}
+
+
+singleR_top_marker_file <- file.path(
+  celltype_marker_results_directory,
+  "GSE298688_SingleR_broad_top10_cell_type_markers.csv"
+)
+
+
+utils::write.csv(
+  singleR_top_markers,
+  singleR_top_marker_file,
+  row.names = FALSE
+)
+
+
+cat(
+  "\nTop marker genes selected for ",
+  length(
+    unique(
+      singleR_top_markers$cluster
+    )
+  ),
+  " SingleR cell types.\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 35. Scale selected marker genes for heatmap visualization
+#------------------------------------------------------------------------------
+
+celltype_heatmap_genes <- unique(
+  singleR_top_markers$gene
+)
+
+
+celltype_heatmap_genes <- intersect(
+  celltype_heatmap_genes,
+  rownames(
+    single_cell_de
+  )
+)
+
+
+if (
+  length(
+    celltype_heatmap_genes
+  ) == 0
+) {
+
+  stop(
+    "No selected SingleR marker genes were found in the Seurat object."
+  )
+}
+
+
+single_cell_de <- Seurat::ScaleData(
+  single_cell_de,
+  assay = "RNA",
+  features = celltype_heatmap_genes,
+  verbose = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 36. Generate SingleR cell-type marker heatmap
+#------------------------------------------------------------------------------
+
+singleR_celltype_heatmap <- Seurat::DoHeatmap(
+  single_cell_de,
+  features = celltype_heatmap_genes,
+  group.by = annotation_column,
+  size = 3
+) +
+  Seurat::NoLegend()
+
+
+print(
+  singleR_celltype_heatmap
+)
+
+
+celltype_heatmap_file <- file.path(
+  celltype_marker_figure_directory,
+  "GSE298688_SingleR_broad_top10_cell_type_marker_heatmap.png"
+)
+
+
+ggplot2::ggsave(
+  filename = celltype_heatmap_file,
+  plot = singleR_celltype_heatmap,
+  width = 14,
+  height = 12,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 37. Generate volcano plots for each SingleR cell type
+#------------------------------------------------------------------------------
+
+singleR_cell_types <- sort(
+  unique(
+    singleR_celltype_markers$cluster
+  )
+)
+
+
+volcano_files <- character(
+  length(
+    singleR_cell_types
+  )
+)
+
+
+for (i in seq_along(
+  singleR_cell_types
+)) {
+
+  cell_type <- singleR_cell_types[i]
+
+
+  cell_type_de <- singleR_celltype_markers %>%
+    dplyr::filter(
+      cluster == cell_type
+    ) %>%
+    dplyr::mutate(
+
+      significance = dplyr::case_when(
+
+        !is.na(
+          p_val_adj
+        ) &
+          p_val_adj < adjusted_p_threshold &
+          avg_log2FC >= marker_log2fc_threshold ~
+          "Upregulated",
+
+        !is.na(
+          p_val_adj
+        ) &
+          p_val_adj < adjusted_p_threshold &
+          avg_log2FC <= -marker_log2fc_threshold ~
+          "Downregulated",
+
+        TRUE ~
+          "Not significant"
+      ),
+
+      plot_p = dplyr::if_else(
+        is.na(
+          p_val_adj
+        ),
+        NA_real_,
+        pmax(
+          p_val_adj,
+          .Machine$double.xmin
+        )
+      ),
+
+      neg_log10_p = -log10(
+        plot_p
+      )
+    )
+
+
+  volcano_labels <- cell_type_de %>%
+    dplyr::filter(
+      significance == "Upregulated"
+    ) %>%
+    dplyr::slice_max(
+      order_by = avg_log2FC,
+      n = top_markers_per_cell_type,
+      with_ties = FALSE
+    )
+
+
+  volcano_plot <- ggplot2::ggplot(
+    cell_type_de,
+    ggplot2::aes(
+      x = avg_log2FC,
+      y = neg_log10_p
+    )
+  ) +
+
+    ggplot2::geom_point(
+      ggplot2::aes(
+        color = significance
+      ),
+      alpha = 0.65,
+      size = 1.5
+    ) +
+
+    ggplot2::geom_vline(
+      xintercept = c(
+        -marker_log2fc_threshold,
+        marker_log2fc_threshold
+      ),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+
+    ggplot2::geom_hline(
+      yintercept = -log10(
+        adjusted_p_threshold
+      ),
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+
+    ggrepel::geom_text_repel(
+      data = volcano_labels,
+      ggplot2::aes(
+        label = gene
+      ),
+      size = 3.2,
+      box.padding = 0.4,
+      point.padding = 0.2,
+      max.overlaps = Inf,
+      min.segment.length = 0,
+      show.legend = FALSE
+    ) +
+
+    ggplot2::scale_color_manual(
+      values = c(
+        "Upregulated" = "#D73027",
+        "Downregulated" = "#4575B4",
+        "Not significant" = "grey70"
+      )
+    ) +
+
+    ggplot2::labs(
+      title = paste0(
+        "Differential Expression of ",
+        cell_type
+      ),
+      subtitle = paste(
+        "SingleR cell type compared with",
+        "all remaining annotated cells"
+      ),
+      x = "Average log2 fold change",
+      y = expression(
+        -log[10](
+          "adjusted p-value"
+        )
+      ),
+      color = NULL
+    ) +
+
+    ggplot2::theme_classic(
+      base_size = 12
+    ) +
+
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        face = "bold",
+        size = 14
+      ),
+      plot.subtitle = ggplot2::element_text(
+        size = 11,
+        color = "grey35"
+      ),
+      axis.title = ggplot2::element_text(
+        face = "bold"
+      ),
+      legend.position = "top",
+      legend.justification = "left"
+    )
+
+
+  print(
+    volcano_plot
+  )
+
+
+  safe_cell_type <- gsub(
+    "[^A-Za-z0-9]+",
+    "_",
+    cell_type
+  )
+
+
+  volcano_file <- file.path(
+    celltype_volcano_figure_directory,
+    paste0(
+      "GSE298688_SingleR_",
+      safe_cell_type,
+      "_volcano.png"
+    )
+  )
+
+
+  ggplot2::ggsave(
+    filename = volcano_file,
+    plot = volcano_plot,
+    width = 7,
+    height = 6,
+    dpi = 300
+  )
+
+
+  volcano_files[i] <- volcano_file
+}
+
+
+cat(
+  "\nVolcano plots generated: ",
+  length(
+    volcano_files
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 38. Save SingleR analysis parameters
+#------------------------------------------------------------------------------
+
+singleR_parameters <- data.frame(
+
+  parameter = c(
+    "reference",
+    "broad_reference_label",
+    "fine_reference_label",
+    "cell_level_annotation",
+    "cluster_level_annotation",
+    "fine_tune",
+    "prune",
+    "minimum_shared_genes_warning",
+    "marker_identity",
+    "marker_test",
+    "marker_min_pct",
+    "marker_log2fc_threshold",
+    "adjusted_p_threshold",
+    "top_markers_per_cell_type"
+  ),
+
+  value = c(
+    "celldex::MouseRNAseqData",
+    "label.main",
+    "label.fine",
+    "broad_and_fine",
+    "broad",
+    singleR_fine_tune,
+    singleR_prune,
+    minimum_shared_genes,
+    annotation_column,
+    "Wilcoxon",
+    marker_min_pct,
+    marker_log2fc_threshold,
+    adjusted_p_threshold,
+    top_markers_per_cell_type
+  ),
+
+  stringsAsFactors = FALSE
+)
+
+
+singleR_parameter_file <- file.path(
+  singleR_results_directory,
+  "GSE298688_SingleR_parameters.csv"
+)
+
+
+utils::write.csv(
+  singleR_parameters,
+  singleR_parameter_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 39. Validate final annotated Seurat object
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating SingleR-annotated Seurat object\n",
+  "------------------------------------------------------------\n"
+)
+
+
+required_singleR_metadata <- c(
+  "SingleR_broad_label",
+  "SingleR_broad_pruned",
+  "SingleR_broad_delta",
+  "SingleR_fine_label",
+  "SingleR_fine_pruned",
+  "SingleR_fine_delta",
+  "SingleR_cluster_label",
+  "SingleR_cluster_pruned"
+)
+
+
+missing_singleR_metadata <- setdiff(
+  required_singleR_metadata,
+  colnames(
+    single_cell@meta.data
+  )
+)
+
+
+if (
+  length(
+    missing_singleR_metadata
+  ) > 0
+) {
+
+  stop(
+    "Required SingleR metadata column(s) missing:\n",
+    paste(
+      missing_singleR_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+
+if (
+  ncol(
+    single_cell
+  ) != nrow(
+    singleR_broad
+  ) ||
+  ncol(
+    single_cell
+  ) != nrow(
+    singleR_fine
+  )
+) {
+
+  stop(
+    "Cell-level SingleR prediction count does not match Seurat cell count."
+  )
+}
+
+
+if (
+  anyDuplicated(
+    colnames(
+      single_cell
+    )
+  ) > 0
+) {
+
+  stop(
+    "Duplicated cell barcodes detected in annotated Seurat object."
+  )
+}
+
+
+cat(
+  "SingleR-annotated Seurat object validation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 40. Save annotated Seurat object and prediction objects
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Saving SingleR objects\n",
+  "------------------------------------------------------------\n"
+)
+
+
+saveRDS(
+  object = single_cell,
+  file = annotated_object_file,
+  compress = TRUE
+)
+
+
+saveRDS(
+  object = singleR_broad,
+  file = broad_prediction_file,
+  compress = TRUE
+)
+
+
+saveRDS(
+  object = singleR_fine,
+  file = fine_prediction_file,
+  compress = TRUE
+)
+
+
+saveRDS(
+  object = singleR_cluster,
+  file = cluster_prediction_file,
+  compress = TRUE
+)
+
+
+#------------------------------------------------------------------------------
+# 41. Validate expected Module 04 outputs
+#------------------------------------------------------------------------------
+
+expected_object_files <- c(
+  annotated_object_file,
+  broad_prediction_file,
+  fine_prediction_file,
+  cluster_prediction_file
+)
+
+
+expected_result_files <- c(
+  gene_overlap_file,
+  broad_cluster_count_file,
+  fine_cluster_count_file,
+  broad_cluster_proportion_file,
+  fine_cluster_proportion_file,
+  cluster_annotation_file,
+  broad_cell_type_count_file,
+  fine_cell_type_count_file,
+  broad_cluster_percent_file,
+  celltype_marker_file,
+  celltype_marker_summary_file,
+  singleR_top_marker_file,
+  singleR_parameter_file
+)
+
+
+expected_figure_files <- c(
+  broad_umap_file,
+  fine_umap_file,
+  cluster_umap_file,
+  annotation_overview_file,
+  broad_cell_count_plot_file,
+  fine_cell_count_plot_file,
+  cluster_cell_type_plot_file,
+  cluster_size_plot_file,
+  canonical_marker_plot_file,
+  celltype_heatmap_file,
+  volcano_files
+)
+
+
+missing_object_files <- expected_object_files[
+  !file.exists(
+    expected_object_files
+  )
+]
+
+
+missing_result_files <- expected_result_files[
+  !file.exists(
+    expected_result_files
+  )
+]
+
+
+missing_figure_files <- expected_figure_files[
+  !file.exists(
+    expected_figure_files
+  )
+]
+
+
+if (
+  length(
+    missing_object_files
+  ) > 0
+) {
+
+  stop(
+    "One or more expected Module 04 object files were not created:\n",
+    paste(
+      missing_object_files,
+      collapse = "\n"
+    )
+  )
+}
+
+
+if (
+  length(
+    missing_result_files
+  ) > 0
+) {
+
+  stop(
+    "One or more expected Module 04 result files were not created:\n",
+    paste(
+      missing_result_files,
+      collapse = "\n"
+    )
+  )
+}
+
+
+if (
+  length(
+    missing_figure_files
+  ) > 0
+) {
+
+  stop(
+    "One or more expected Module 04 figure files were not created:\n",
+    paste(
+      missing_figure_files,
+      collapse = "\n"
+    )
+  )
+}
+
+
+cat(
+  "All expected Module 04 outputs were created successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 42. Final module summary
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "MODULE 04 COMPLETE — SingleR cell-type annotation\n",
+  "============================================================\n",
+  "Cells annotated:          ", ncol(single_cell), "\n",
+  "Seurat clusters:          ",
+  length(
+    unique(
+      single_cell$seurat_clusters
+    )
+  ),
+  "\n",
+  "Broad cell types:         ",
+  length(
+    unique(
+      single_cell$SingleR_broad_pruned
+    )
+  ),
+  "\n",
+  "Fine cell types:          ",
+  length(
+    unique(
+      single_cell$SingleR_fine_pruned
+    )
+  ),
+  "\n",
+  "Shared reference genes:   ",
+  length(
+    shared_genes
+  ),
+  "\n",
+  "Broad unassigned cells:   ",
+  round(
+    broad_unassigned_percent,
+    2
+  ),
+  "%\n",
+  "Fine unassigned cells:    ",
+  round(
+    fine_unassigned_percent,
+    2
+  ),
+  "%\n",
+  "Cell types in DEA:        ",
+  length(
+    singleR_cell_types
+  ),
+  "\n",
+  "Cell-type marker results: ",
+  nrow(
+    singleR_celltype_markers
+  ),
+  "\n",
+  "Volcano plots:            ",
+  length(
+    volcano_files
+  ),
+  "\n",
+  "\n",
+  "Primary output:\n",
+  "  ", annotated_object_file, "\n",
+  "\n",
+  "SingleR prediction objects:\n",
+  "  ", singleR_object_directory, "\n",
+  "\n",
+  "SingleR result tables:\n",
+  "  ", singleR_results_directory, "\n",
+  "\n",
+  "Cell-type marker tables:\n",
+  "  ", celltype_marker_results_directory, "\n",
+  "\n",
+  "SingleR figures:\n",
+  "  ", singleR_figure_directory, "\n",
+  "\n",
+  "Diagnostic figures:\n",
+  "  ", diagnostic_figure_directory, "\n",
+  "\n",
+  "Cell-type marker figures:\n",
+  "  ", celltype_marker_figure_directory, "\n",
+  "\n",
+  "Next module:\n",
+  "  05_seurat_cellchat.Rmd\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+```

@@ -1,0 +1,3188 @@
+---
+title: "Module 14: TCGA-GBM validation of PRKCD-associated biology"
+output: html_document
+date: "2026-08-12"
+---
+
+```{r}
+#==============================================================================
+# MODULE 14 — BULK RNA-SEQ VALIDATION — TCGA
+#==============================================================================
+#
+# Purpose:
+#   Validate a candidate gene identified from single-cell and spatial analyses
+#   using TCGA bulk RNA-seq data obtained through UCSC Xena.
+#
+# Analyses:
+#   1. Download TCGA RNA-seq and clinical data
+#   2. Download/load TCGA survival data
+#   3. Retain primary tumor samples
+#   4. Define target-gene high and low tumors
+#   5. Differential expression analysis
+#   6. Volcano plot and DEG heatmap
+#   7. Hallmark and GO Biological Process GSEA
+#   8. xCell, MCP-counter, and ESTIMATE deconvolution
+#   9. High vs low immune-deconvolution comparisons
+#  10. Target-gene correlations with xCell populations
+#  11. Target-gene correlations with ESTIMATE / tumor purity
+#  12. Overall survival analysis
+#
+# Main settings to change:
+#
+#   tcga_project <- "GBM"
+#   target_gene  <- "PRKCD"
+#
+#==============================================================================
+
+
+#==============================================================================
+# 1. Libraries
+#==============================================================================
+
+library(UCSCXenaTools)
+library(here)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+
+library(limma)
+
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+
+library(fgsea)
+library(msigdbr)
+
+library(immunedeconv)
+
+library(survival)
+library(survminer)
+
+set.seed(1234)
+
+
+#==============================================================================
+# 2. User settings
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# TCGA cancer project
+#
+# Examples:
+#   GBM  = Glioblastoma
+#   LGG  = Lower-grade glioma
+#   BRCA = Breast cancer
+#   LUAD = Lung adenocarcinoma
+#------------------------------------------------------------------------------
+
+tcga_project <- "GBM"
+
+
+#------------------------------------------------------------------------------
+# Target gene
+#------------------------------------------------------------------------------
+
+target_gene <- "PRKCD"
+
+
+
+#------------------------------------------------------------------------------
+# Differential-expression thresholds
+#------------------------------------------------------------------------------
+
+dea_fdr_threshold <- 0.05
+dea_logfc_threshold <- 1
+
+
+#------------------------------------------------------------------------------
+# GSEA settings
+#------------------------------------------------------------------------------
+
+gsea_fdr_threshold <- 0.05
+gsea_min_size <- 15
+gsea_max_size <- 500
+gsea_top_pathways <- 10
+
+
+#------------------------------------------------------------------------------
+# Figure settings
+#------------------------------------------------------------------------------
+
+volcano_label_genes <- 15
+heatmap_top_genes <- 25
+
+correlation_fdr_threshold <- 0.05
+
+
+#==============================================================================
+# 3. Analysis identifier
+#==============================================================================
+
+analysis_prefix <- paste(
+  "TCGA",
+  tcga_project,
+  target_gene,
+  sep = "_"
+)
+
+
+#==============================================================================
+# 4. Project directory structure
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# Raw bulk RNA-seq data downloaded from UCSC Xena
+#
+# data/raw/bulk/GBM/
+#------------------------------------------------------------------------------
+
+tcga_directory <- here::here(
+  "data",
+  "raw",
+  "bulk",
+  tcga_project
+)
+
+
+#------------------------------------------------------------------------------
+# Processed bulk data
+#
+# data/processed/bulk/GBM/PRKCD/
+#------------------------------------------------------------------------------
+
+processed_data_directory <- here::here(
+  "data",
+  "processed",
+  "bulk",
+  tcga_project,
+  target_gene
+)
+
+
+#------------------------------------------------------------------------------
+# Main bulk results directory
+#
+# results/bulk/GBM/PRKCD/
+#------------------------------------------------------------------------------
+
+results_directory <- here::here(
+  "results",
+  "bulk",
+  tcga_project,
+  target_gene
+)
+
+
+#------------------------------------------------------------------------------
+# Results subdirectories
+#------------------------------------------------------------------------------
+
+dea_results_directory <- file.path(
+  results_directory,
+  "DEA"
+)
+
+gsea_results_directory <- file.path(
+  results_directory,
+  "GSEA"
+)
+
+immune_results_directory <- file.path(
+  results_directory,
+  "immune_deconvolution"
+)
+
+correlation_results_directory <- file.path(
+  results_directory,
+  "correlations"
+)
+
+survival_results_directory <- file.path(
+  results_directory,
+  "survival"
+)
+
+
+#------------------------------------------------------------------------------
+# Main bulk figure directory
+#
+# figures/bulk/GBM/PRKCD/
+#------------------------------------------------------------------------------
+
+figures_directory <- here::here(
+  "figures",
+  "bulk",
+  tcga_project,
+  target_gene
+)
+
+
+#------------------------------------------------------------------------------
+# Figure subdirectories
+#------------------------------------------------------------------------------
+
+dea_figure_directory <- file.path(
+  figures_directory,
+  "DEA"
+)
+
+gsea_figure_directory <- file.path(
+  figures_directory,
+  "GSEA"
+)
+
+immune_figure_directory <- file.path(
+  figures_directory,
+  "immune_deconvolution"
+)
+
+correlation_figure_directory <- file.path(
+  figures_directory,
+  "correlations"
+)
+
+survival_figure_directory <- file.path(
+  figures_directory,
+  "survival"
+)
+
+
+#------------------------------------------------------------------------------
+# Create directories
+#------------------------------------------------------------------------------
+
+output_directories <- c(
+  tcga_directory,
+  processed_data_directory,
+  results_directory,
+  dea_results_directory,
+  gsea_results_directory,
+  immune_results_directory,
+  correlation_results_directory,
+  survival_results_directory,
+  figures_directory,
+  dea_figure_directory,
+  gsea_figure_directory,
+  immune_figure_directory,
+  correlation_figure_directory,
+  survival_figure_directory
+)
+
+for (directory in output_directories) {
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# Print directory structure
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "TCGA BULK RNA-SEQ VALIDATION\n",
+  "============================================================\n",
+  "TCGA project: ", tcga_project, "\n",
+  "Target gene:  ", target_gene, "\n",
+  "\nRepository root:\n",
+  here::here(),
+  "\n\nRaw bulk data:\n",
+  tcga_directory,
+  "\n\nProcessed bulk data:\n",
+  processed_data_directory,
+  "\n\nBulk results:\n",
+  results_directory,
+  "\n\nBulk figures:\n",
+  figures_directory,
+  "\n============================================================\n",
+  sep = ""
+)
+
+
+#==============================================================================
+# 5. Helper functions
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# Save ggplot objects as PNG and PDF
+#------------------------------------------------------------------------------
+
+save_ggplot <- function(
+  plot_object,
+  filename,
+  width = 8,
+  height = 6
+) {
+  ggsave(
+    filename = paste0(
+      filename,
+      ".png"
+    ),
+    plot = plot_object,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+
+  ggsave(
+    filename = paste0(
+      filename,
+      ".pdf"
+    ),
+    plot = plot_object,
+    width = width,
+    height = height
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# Safe Spearman correlation
+#------------------------------------------------------------------------------
+
+safe_spearman <- function(
+  x,
+  y
+) {
+  keep <- complete.cases(
+    x,
+    y
+  )
+
+  x <- x[keep]
+  y <- y[keep]
+
+  if (
+    length(x) < 3 ||
+    length(unique(x)) < 2 ||
+    length(unique(y)) < 2
+  ) {
+    return(
+      data.frame(
+        n_samples = length(x),
+        correlation = NA_real_,
+        p_value = NA_real_
+      )
+    )
+  }
+
+  test <- suppressWarnings(
+    cor.test(
+      x,
+      y,
+      method = "spearman",
+      exact = FALSE
+    )
+  )
+
+  data.frame(
+    n_samples = length(x),
+    correlation = unname(
+      test$estimate
+    ),
+    p_value = test$p.value
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# Prepare immunedeconv output
+#------------------------------------------------------------------------------
+
+prepare_deconvolution_long <- function(
+  deconvolution_results,
+  method_name,
+  sample_metadata
+) {
+  deconvolution_results %>%
+    tidyr::pivot_longer(
+      cols = -cell_type,
+      names_to = "sample",
+      values_to = "score"
+    ) %>%
+    dplyr::mutate(
+      score = as.numeric(
+        score
+      ),
+      method = method_name
+    ) %>%
+    dplyr::left_join(
+      sample_metadata %>%
+        dplyr::select(
+          sample,
+          target_expression,
+          target_group
+        ),
+      by = "sample"
+    ) %>%
+    dplyr::filter(
+      !is.na(score),
+      !is.na(target_expression),
+      !is.na(target_group)
+    )
+}
+
+
+#==============================================================================
+# 6. Identify TCGA RNA-seq and clinical datasets
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "TCGA DATA DOWNLOAD\n",
+  "============================================================\n"
+)
+
+cat(
+  "\nChecking TCGA-",
+  tcga_project,
+  " datasets...\n",
+  sep = ""
+)
+
+tcga_info <- UCSCXenaTools::getTCGAdata(
+  project = tcga_project,
+  clinical = TRUE,
+  mRNASeq = TRUE,
+  mRNASeqType = "normalized",
+  download = FALSE
+)
+
+data_info_columns <- intersect(
+  c(
+    "XenaDatasets",
+    "SampleCount",
+    "DataType",
+    "FileType"
+  ),
+  colnames(
+    tcga_info$DataInfo
+  )
+)
+
+cat(
+  "\nDatasets selected by UCSCXenaTools:\n\n"
+)
+
+print(
+  tcga_info$DataInfo[
+    ,
+    data_info_columns,
+    drop = FALSE
+  ]
+)
+
+
+#==============================================================================
+# 7. Download TCGA RNA-seq and clinical data
+#==============================================================================
+
+cat(
+  "\nDownloading TCGA-",
+  tcga_project,
+  " RNA-seq and clinical data...\n",
+  sep = ""
+)
+
+tcga_download <- UCSCXenaTools::getTCGAdata(
+  project = tcga_project,
+  clinical = TRUE,
+  mRNASeq = TRUE,
+  mRNASeqType = "normalized",
+  download = TRUE,
+  destdir = tcga_directory
+)
+
+cat(
+  "\nDownload information:\n\n"
+)
+
+print(
+  tcga_download
+)
+
+
+#==============================================================================
+# 8. Prepare downloaded TCGA data
+#==============================================================================
+
+tcga_data <- UCSCXenaTools::XenaPrepare(
+  tcga_download
+)
+
+cat(
+  "\nObjects returned by XenaPrepare:\n\n"
+)
+
+print(
+  names(
+    tcga_data
+  )
+)
+
+cat(
+  "\nObject dimensions:\n\n"
+)
+
+print(
+  lapply(
+    tcga_data,
+    dim
+  )
+)
+
+
+#==============================================================================
+# 9. Identify expression and clinical objects
+#==============================================================================
+
+rna_object_name <- grep(
+  "^HiSeqV2(\\.gz)?$",
+  names(
+    tcga_data
+  ),
+  value = TRUE
+)
+
+if (length(rna_object_name) != 1) {
+  stop(
+    paste0(
+      "Could not uniquely identify HiSeqV2.\n",
+      paste(
+        names(tcga_data),
+        collapse = "\n"
+      )
+    )
+  )
+}
+
+clinical_object_name <- grep(
+  "clinicalMatrix",
+  names(
+    tcga_data
+  ),
+  value = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(clinical_object_name) != 1) {
+  stop(
+    paste0(
+      "Could not uniquely identify clinicalMatrix.\n",
+      paste(
+        names(tcga_data),
+        collapse = "\n"
+      )
+    )
+  )
+}
+
+expression_data <- tcga_data[[rna_object_name]]
+clinical_data <- tcga_data[[clinical_object_name]]
+
+cat(
+  "\nRNA-seq object: ",
+  rna_object_name,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Clinical object: ",
+  clinical_object_name,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nRNA-seq dimensions:\n"
+)
+
+print(
+  dim(
+    expression_data
+  )
+)
+
+cat(
+  "\nClinical dimensions:\n"
+)
+
+print(
+  dim(
+    clinical_data
+  )
+)
+
+
+#==============================================================================
+# 10. Download or locate survival data
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "TCGA SURVIVAL DATA\n",
+  "============================================================\n"
+)
+
+survival_file <- file.path(
+  tcga_directory,
+  "survival",
+  paste0(
+    tcga_project,
+    "_survival.txt"
+  )
+)
+
+if (!file.exists(survival_file)) {
+  cat(
+    "\nSurvival file not found locally.\n",
+    "Searching UCSC Xena...\n",
+    sep = ""
+  )
+
+  xena_tcga <- UCSCXenaTools::XenaGenerate(
+    subset = XenaHostNames == "tcgaHub"
+  )
+
+  survival_dataset_name <- paste0(
+    "survival/",
+    tcga_project,
+    "_survival.txt"
+  )
+
+  survival_xena <- UCSCXenaTools::XenaFilter(
+    xena_tcga,
+    filterDatasets = survival_dataset_name
+  )
+
+  available_survival_datasets <- UCSCXenaTools::datasets(
+    survival_xena
+  )
+
+  if (!survival_dataset_name %in% available_survival_datasets) {
+    stop(
+      paste0(
+        "Could not locate survival dataset:\n",
+        survival_dataset_name
+      )
+    )
+  }
+
+  cat(
+    "\nSurvival dataset found: ",
+    survival_dataset_name,
+    "\n",
+    sep = ""
+  )
+
+  survival_query <- UCSCXenaTools::XenaQuery(
+    survival_xena
+  )
+
+  cat(
+    "\nSurvival download query:\n\n"
+  )
+
+  print(
+    survival_query
+  )
+
+  survival_download <- UCSCXenaTools::XenaDownload(
+    survival_query,
+    destdir = tcga_directory
+  )
+
+  cat(
+    "\nSurvival download complete.\n"
+  )
+}
+
+if (!file.exists(survival_file)) {
+  stop(
+    paste0(
+      "Survival file was not found:\n",
+      survival_file
+    )
+  )
+}
+
+
+#==============================================================================
+# 11. Load survival data
+#==============================================================================
+
+survival_data_raw <- readr::read_tsv(
+  survival_file,
+  show_col_types = FALSE
+)
+
+cat(
+  "\nSurvival dimensions:\n"
+)
+
+print(
+  dim(
+    survival_data_raw
+  )
+)
+
+cat(
+  "\nSurvival variables:\n\n"
+)
+
+print(
+  colnames(
+    survival_data_raw
+  )
+)
+
+
+#==============================================================================
+# 12. Prepare expression matrix
+#==============================================================================
+
+expression_data <- as.data.frame(
+  expression_data,
+  check.names = FALSE
+)
+
+gene_column <- colnames(
+  expression_data
+)[1]
+
+gene_names <- as.character(
+  expression_data[[gene_column]]
+)
+
+expression_matrix <- as.matrix(
+  expression_data[
+    ,
+    setdiff(
+      colnames(
+        expression_data
+      ),
+      gene_column
+    ),
+    drop = FALSE
+  ]
+)
+
+storage.mode(
+  expression_matrix
+) <- "numeric"
+
+rownames(
+  expression_matrix
+) <- gene_names
+
+valid_gene_rows <- !is.na(
+  rownames(
+    expression_matrix
+  )
+) &
+  rownames(
+    expression_matrix
+  ) != ""
+
+expression_matrix <- expression_matrix[
+  valid_gene_rows,
+  ,
+  drop = FALSE
+]
+
+if (
+  anyDuplicated(
+    rownames(
+      expression_matrix
+    )
+  ) > 0
+) {
+  expression_matrix <- limma::avereps(
+    expression_matrix
+  )
+}
+
+cat(
+  "\nFull expression matrix:\n"
+)
+
+print(
+  dim(
+    expression_matrix
+  )
+)
+
+
+#==============================================================================
+# 13. Retain primary tumor samples
+#==============================================================================
+
+# TCGA sample-type code 01 = Primary Solid Tumor.
+
+sample_barcodes <- colnames(
+  expression_matrix
+)
+
+sample_type <- substr(
+  sample_barcodes,
+  14,
+  15
+)
+
+primary_samples <- sample_barcodes[
+  sample_type == "01"
+]
+
+if (length(primary_samples) == 0) {
+  stop(
+    "No TCGA primary tumor samples were found."
+  )
+}
+
+expression_primary <- expression_matrix[
+  ,
+  primary_samples,
+  drop = FALSE
+]
+
+cat(
+  "\nPrimary tumor samples retained: ",
+  ncol(
+    expression_primary
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#==============================================================================
+# 14. Confirm target gene
+#==============================================================================
+
+if (
+  !target_gene %in%
+    rownames(
+      expression_primary
+    )
+) {
+  stop(
+    paste0(
+      "Target gene ",
+      target_gene,
+      " was not found in the expression matrix."
+    )
+  )
+}
+
+
+#==============================================================================
+# 15. Define target-gene expression groups
+#==============================================================================
+
+target_expression <- as.numeric(
+  expression_primary[
+    target_gene,
+    ,
+    drop = TRUE
+  ]
+)
+
+names(
+  target_expression
+) <- colnames(
+  expression_primary
+)
+
+target_cutpoint <- median(
+  target_expression,
+  na.rm = TRUE
+)
+
+target_group <- ifelse(
+  target_expression > target_cutpoint,
+  "High",
+  "Low"
+)
+
+target_group <- factor(
+  target_group,
+  levels = c(
+    "Low",
+    "High"
+  )
+)
+
+sample_metadata <- data.frame(
+  sample = colnames(
+    expression_primary
+  ),
+  patient = substr(
+    colnames(
+      expression_primary
+    ),
+    1,
+    12
+  ),
+  target_expression = target_expression,
+  target_group = target_group,
+  stringsAsFactors = FALSE
+)
+
+cat(
+  "\nTarget gene: ",
+  target_gene,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Median expression cutpoint: ",
+  round(
+    target_cutpoint,
+    4
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nExpression groups:\n"
+)
+
+print(
+  table(
+    sample_metadata$target_group
+  )
+)
+
+
+#==============================================================================
+# 16. Save processed bulk data
+#==============================================================================
+
+write.csv(
+  sample_metadata,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_sample_metadata.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  sample_metadata,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_sample_metadata.rds"
+    )
+  )
+)
+
+saveRDS(
+  expression_primary,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_primary_tumor_expression.rds"
+    )
+  )
+)
+
+saveRDS(
+  clinical_data,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_clinical_data.rds"
+    )
+  )
+)
+
+saveRDS(
+  survival_data_raw,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_survival_data_raw.rds"
+    )
+  )
+)
+
+
+#==============================================================================
+# 17. Differential expression analysis
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "DIFFERENTIAL EXPRESSION\n",
+  "============================================================\n"
+)
+
+design <- model.matrix(
+  ~ 0 + target_group
+)
+
+colnames(
+  design
+) <- c(
+  "Low",
+  "High"
+)
+
+fit <- limma::lmFit(
+  expression_primary,
+  design
+)
+
+contrast_matrix <- limma::makeContrasts(
+  High_vs_Low = High - Low,
+  levels = design
+)
+
+fit <- limma::contrasts.fit(
+  fit,
+  contrast_matrix
+)
+
+fit <- limma::eBayes(
+  fit
+)
+
+dea_results <- limma::topTable(
+  fit,
+  coef = "High_vs_Low",
+  number = Inf,
+  adjust.method = "BH",
+  sort.by = "P"
+)
+
+dea_results <- dea_results %>%
+  tibble::rownames_to_column(
+    var = "gene"
+  ) %>%
+  dplyr::mutate(
+    significance = dplyr::case_when(
+      adj.P.Val < dea_fdr_threshold &
+        logFC >= dea_logfc_threshold ~ "Up",
+      adj.P.Val < dea_fdr_threshold &
+        logFC <= -dea_logfc_threshold ~ "Down",
+      TRUE ~ "NS"
+    )
+  )
+
+cat(
+  "\nUpregulated genes: ",
+  sum(
+    dea_results$significance == "Up"
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Downregulated genes: ",
+  sum(
+    dea_results$significance == "Down"
+  ),
+  "\n",
+  sep = ""
+)
+
+write.csv(
+  dea_results,
+  file.path(
+    dea_results_directory,
+    paste0(
+      analysis_prefix,
+      "_DEA.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  dea_results,
+  file.path(
+    dea_results_directory,
+    paste0(
+      analysis_prefix,
+      "_DEA.rds"
+    )
+  )
+)
+
+
+#==============================================================================
+# 18. Volcano plot
+#==============================================================================
+
+volcano_data <- dea_results %>%
+  dplyr::mutate(
+    minus_log10_fdr = -log10(
+      pmax(
+        adj.P.Val,
+        .Machine$double.xmin
+      )
+    )
+  )
+
+volcano_labels <- volcano_data %>%
+  dplyr::filter(
+    significance != "NS"
+  ) %>%
+  dplyr::arrange(
+    adj.P.Val
+  ) %>%
+  dplyr::slice_head(
+    n = volcano_label_genes
+  )
+
+volcano_plot <- ggplot(
+  volcano_data,
+  aes(
+    x = logFC,
+    y = minus_log10_fdr,
+    color = significance
+  )
+) +
+  geom_point(
+    alpha = 0.65,
+    size = 1.5
+  ) +
+  geom_vline(
+    xintercept = c(
+      -dea_logfc_threshold,
+      dea_logfc_threshold
+    ),
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_hline(
+    yintercept = -log10(
+      dea_fdr_threshold
+    ),
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  ggrepel::geom_text_repel(
+    data = volcano_labels,
+    aes(
+      label = gene
+    ),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    values = c(
+      "Down" = "blue",
+      "NS" = "grey",
+      "Up" = "red"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      ": ",
+      target_gene,
+      "-high vs ",
+      target_gene,
+      "-low"
+    ),
+    x = "log2 fold change",
+    y = "-log10 FDR",
+    color = NULL
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    plot.title = element_text(
+      face = "bold"
+    ),
+    legend.position = "top"
+  )
+
+# Display plot.
+print(
+  volcano_plot
+)
+
+# Save plot.
+save_ggplot(
+  volcano_plot,
+  file.path(
+    dea_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_volcano"
+    )
+  ),
+  width = 8,
+  height = 7
+)
+
+
+#==============================================================================
+# 19. Differential-expression heatmap
+#==============================================================================
+
+heatmap_genes <- dea_results %>%
+  dplyr::filter(
+    significance != "NS",
+    gene != target_gene
+  ) %>%
+  dplyr::arrange(
+    adj.P.Val
+  ) %>%
+  dplyr::slice_head(
+    n = heatmap_top_genes
+  ) %>%
+  dplyr::pull(
+    gene
+  )
+
+if (length(heatmap_genes) >= 2) {
+  heatmap_matrix <- expression_primary[
+    heatmap_genes,
+    ,
+    drop = FALSE
+  ]
+
+  heatmap_annotation <- data.frame(
+    Group = sample_metadata$target_group
+  )
+
+  rownames(
+    heatmap_annotation
+  ) <- sample_metadata$sample
+
+  sample_order <- order(
+    sample_metadata$target_group,
+    sample_metadata$target_expression
+  )
+
+  heatmap_matrix <- heatmap_matrix[
+    ,
+    sample_metadata$sample[
+      sample_order
+    ],
+    drop = FALSE
+  ]
+
+  heatmap_annotation <- heatmap_annotation[
+    sample_metadata$sample[
+      sample_order
+    ],
+    ,
+    drop = FALSE
+  ]
+
+  heatmap_plot <- pheatmap::pheatmap(
+    heatmap_matrix,
+    scale = "row",
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    show_rownames = TRUE,
+    show_colnames = FALSE,
+    annotation_col = heatmap_annotation,
+    border_color = NA,
+    fontsize_row = 9,
+    main = paste0(
+      "TCGA-",
+      tcga_project,
+      ": ",
+      target_gene,
+      "-associated genes"
+    ),
+    silent = TRUE
+  )
+
+  # Display heatmap.
+  grid::grid.newpage()
+
+  grid::grid.draw(
+    heatmap_plot$gtable
+  )
+
+  # Save PNG.
+  png(
+    filename = file.path(
+      dea_figure_directory,
+      paste0(
+        analysis_prefix,
+        "_heatmap.png"
+      )
+    ),
+    width = 3000,
+    height = 2200,
+    res = 300
+  )
+
+  grid::grid.draw(
+    heatmap_plot$gtable
+  )
+
+  dev.off()
+
+  # Save PDF.
+  pdf(
+    file = file.path(
+      dea_figure_directory,
+      paste0(
+        analysis_prefix,
+        "_heatmap.pdf"
+      )
+    ),
+    width = 10,
+    height = 8
+  )
+
+  grid::grid.draw(
+    heatmap_plot$gtable
+  )
+
+  dev.off()
+}
+
+
+#==============================================================================
+# 20. Prepare ranked genes for GSEA
+#==============================================================================
+
+# Limma moderated t-statistic used for pre-ranked GSEA.
+
+gsea_ranks <- dea_results$t
+
+names(
+  gsea_ranks
+) <- dea_results$gene
+
+gsea_ranks <- gsea_ranks[
+  is.finite(
+    gsea_ranks
+  )
+]
+
+gsea_ranks <- sort(
+  gsea_ranks,
+  decreasing = TRUE
+)
+
+
+#==============================================================================
+# 21. GSEA helper function
+#==============================================================================
+
+run_gsea_collection <- function(
+  collection_name,
+  output_label,
+  subcollection_name = NULL
+) {
+  cat(
+    "\nRunning ",
+    output_label,
+    " GSEA...\n",
+    sep = ""
+  )
+
+  if (is.null(subcollection_name)) {
+    gene_sets <- msigdbr::msigdbr(
+      species = "Homo sapiens",
+      collection = collection_name
+    )
+  } else {
+    gene_sets <- msigdbr::msigdbr(
+      species = "Homo sapiens",
+      collection = collection_name,
+      subcollection = subcollection_name
+    )
+  }
+
+  pathway_list <- split(
+    gene_sets$gene_symbol,
+    gene_sets$gs_name
+  )
+
+  pathway_list <- lapply(
+    pathway_list,
+    unique
+  )
+
+  gsea_result <- fgsea::fgsea(
+    pathways = pathway_list,
+    stats = gsea_ranks,
+    minSize = gsea_min_size,
+    maxSize = gsea_max_size,
+    eps = 0
+  )
+
+  gsea_result <- as.data.frame(
+    gsea_result
+  ) %>%
+    dplyr::arrange(
+      padj
+    ) %>%
+    dplyr::mutate(
+      direction = ifelse(
+        NES > 0,
+        "High",
+        "Low"
+      )
+    )
+
+  gsea_save <- gsea_result
+
+  if ("leadingEdge" %in% colnames(gsea_save)) {
+    gsea_save$leadingEdge <- vapply(
+      gsea_save$leadingEdge,
+      paste,
+      collapse = ";",
+      FUN.VALUE = character(1)
+    )
+  }
+
+  write.csv(
+    gsea_save,
+    file.path(
+      gsea_results_directory,
+      paste0(
+        analysis_prefix,
+        "_",
+        output_label,
+        "_GSEA.csv"
+      )
+    ),
+    row.names = FALSE
+  )
+
+  significant_gsea <- gsea_result %>%
+    dplyr::filter(
+      !is.na(padj),
+      padj < gsea_fdr_threshold
+    )
+
+  cat(
+    output_label,
+    " significant pathways: ",
+    nrow(
+      significant_gsea
+    ),
+    "\n",
+    sep = ""
+  )
+
+  if (nrow(significant_gsea) > 0) {
+    gsea_plot_data <- significant_gsea %>%
+      dplyr::group_by(
+        direction
+      ) %>%
+      dplyr::arrange(
+        padj,
+        .by_group = TRUE
+      ) %>%
+      dplyr::slice_head(
+        n = gsea_top_pathways
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(
+        pathway_label = gsub(
+          "^HALLMARK_|^GOBP_",
+          "",
+          pathway
+        ),
+        pathway_label = gsub(
+          "_",
+          " ",
+          pathway_label
+        ),
+        minus_log10_fdr = -log10(
+          pmax(
+            padj,
+            .Machine$double.xmin
+          )
+        )
+      )
+
+    gsea_plot <- ggplot(
+      gsea_plot_data,
+      aes(
+        x = NES,
+        y = reorder(
+          pathway_label,
+          NES
+        ),
+        size = minus_log10_fdr,
+        color = direction
+      )
+    ) +
+      geom_vline(
+        xintercept = 0,
+        linetype = "dashed",
+        linewidth = 0.5
+      ) +
+      geom_point(
+        alpha = 0.9
+      ) +
+      scale_color_manual(
+        values = c(
+          "High" = "red",
+          "Low" = "blue"
+        )
+      ) +
+      labs(
+        title = paste0(
+          "TCGA-",
+          tcga_project,
+          " ",
+          target_gene,
+          " GSEA"
+        ),
+        subtitle = output_label,
+        x = "Normalized enrichment score",
+        y = NULL,
+        size = "-log10 FDR",
+        color = NULL
+      ) +
+      theme_classic(
+        base_size = 11
+      ) +
+      theme(
+        plot.title = element_text(
+          face = "bold"
+        )
+      )
+
+    # Display plot.
+    print(
+      gsea_plot
+    )
+
+    # Save plot.
+    save_ggplot(
+      gsea_plot,
+      file.path(
+        gsea_figure_directory,
+        paste0(
+          analysis_prefix,
+          "_",
+          output_label,
+          "_GSEA_dotplot"
+        )
+      ),
+      width = 10,
+      height = 8
+    )
+  }
+
+  return(
+    gsea_result
+  )
+}
+
+
+#==============================================================================
+# 22. Hallmark GSEA
+#==============================================================================
+
+hallmark_gsea <- run_gsea_collection(
+  collection_name = "H",
+  output_label = "Hallmark"
+)
+
+
+#==============================================================================
+# 23. GO Biological Process GSEA
+#==============================================================================
+
+gobp_gsea <- run_gsea_collection(
+  collection_name = "C5",
+  output_label = "GOBP",
+  subcollection_name = "GO:BP"
+)
+
+
+#==============================================================================
+# 24. Prepare expression for immune deconvolution
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "IMMUNE DECONVOLUTION\n",
+  "============================================================\n"
+)
+
+immune_expression <- expression_primary
+
+immune_expression <- immune_expression[
+  rowSums(
+    is.finite(
+      immune_expression
+    )
+  ) == ncol(
+    immune_expression
+  ),
+  ,
+  drop = FALSE
+]
+
+cat(
+  "\nExpression dimensions:\n"
+)
+
+print(
+  dim(
+    immune_expression
+  )
+)
+
+
+#==============================================================================
+# 25. xCell
+#==============================================================================
+
+cat(
+  "\nRunning xCell...\n"
+)
+
+xcell_results <- immunedeconv::deconvolute(
+  gene_expression = immune_expression,
+  method = "xcell"
+)
+
+xcell_results <- as.data.frame(
+  xcell_results,
+  check.names = FALSE
+)
+
+colnames(
+  xcell_results
+)[1] <- "cell_type"
+
+write.csv(
+  xcell_results,
+  file.path(
+    immune_results_directory,
+    paste0(
+      analysis_prefix,
+      "_xCell_results.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 26. MCP-counter
+#==============================================================================
+
+cat(
+  "\nRunning MCP-counter...\n"
+)
+
+mcp_results <- immunedeconv::deconvolute(
+  gene_expression = immune_expression,
+  method = "mcp_counter"
+)
+
+mcp_results <- as.data.frame(
+  mcp_results,
+  check.names = FALSE
+)
+
+colnames(
+  mcp_results
+)[1] <- "cell_type"
+
+write.csv(
+  mcp_results,
+  file.path(
+    immune_results_directory,
+    paste0(
+      analysis_prefix,
+      "_MCPcounter_results.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 27. ESTIMATE
+#==============================================================================
+
+cat(
+  "\nRunning ESTIMATE...\n"
+)
+
+estimate_results <- immunedeconv::deconvolute(
+  gene_expression = immune_expression,
+  method = "estimate"
+)
+
+estimate_results <- as.data.frame(
+  estimate_results,
+  check.names = FALSE
+)
+
+colnames(
+  estimate_results
+)[1] <- "cell_type"
+
+write.csv(
+  estimate_results,
+  file.path(
+    immune_results_directory,
+    paste0(
+      analysis_prefix,
+      "_ESTIMATE_results.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 28. Prepare deconvolution results
+#==============================================================================
+
+xcell_long <- prepare_deconvolution_long(
+  xcell_results,
+  "xCell",
+  sample_metadata
+)
+
+mcp_long <- prepare_deconvolution_long(
+  mcp_results,
+  "MCP-counter",
+  sample_metadata
+)
+
+estimate_long <- prepare_deconvolution_long(
+  estimate_results,
+  "ESTIMATE",
+  sample_metadata
+)
+
+immune_long <- dplyr::bind_rows(
+  xcell_long,
+  mcp_long,
+  estimate_long
+)
+
+write.csv(
+  immune_long,
+  file.path(
+    immune_results_directory,
+    paste0(
+      analysis_prefix,
+      "_all_deconvolution_scores_long.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 29. High vs low immune-deconvolution statistics
+#==============================================================================
+
+immune_statistics <- immune_long %>%
+  dplyr::group_by(
+    method,
+    cell_type
+  ) %>%
+  dplyr::summarise(
+    n_low = sum(
+      target_group == "Low"
+    ),
+    n_high = sum(
+      target_group == "High"
+    ),
+    median_low = median(
+      score[
+        target_group == "Low"
+      ],
+      na.rm = TRUE
+    ),
+    median_high = median(
+      score[
+        target_group == "High"
+      ],
+      na.rm = TRUE
+    ),
+    median_difference = median_high - median_low,
+    p_value = tryCatch(
+      wilcox.test(
+        score ~ target_group,
+        exact = FALSE
+      )$p.value,
+      error = function(e) {
+        NA_real_
+      }
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::group_by(
+    method
+  ) %>%
+  dplyr::mutate(
+    p_adjusted = p.adjust(
+      p_value,
+      method = "BH"
+    )
+  ) %>%
+  dplyr::ungroup()
+
+cat(
+  "\nImmune-deconvolution statistics:\n\n"
+)
+
+print(
+  immune_statistics %>%
+    dplyr::arrange(
+      p_adjusted
+    )
+)
+
+write.csv(
+  immune_statistics,
+  file.path(
+    immune_results_directory,
+    paste0(
+      analysis_prefix,
+      "_immune_statistics.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 30. xCell boxplots
+#==============================================================================
+
+xcell_boxplot <- ggplot(
+  xcell_long,
+  aes(
+    x = target_group,
+    y = score,
+    fill = target_group
+  )
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA,
+    alpha = 0.75
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 0.5,
+    alpha = 0.30
+  ) +
+  facet_wrap(
+    ~ cell_type,
+    scales = "free_y",
+    ncol = 5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Low" = "blue",
+      "High" = "red"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      " xCell deconvolution"
+    ),
+    subtitle = paste0(
+      target_gene,
+      "-high vs ",
+      target_gene,
+      "-low"
+    ),
+    x = NULL,
+    y = "xCell score",
+    fill = target_gene
+  ) +
+  theme_classic(
+    base_size = 10
+  ) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(
+      size = 7
+    )
+  )
+
+# Display plot.
+print(
+  xcell_boxplot
+)
+
+# Save plot.
+save_ggplot(
+  xcell_boxplot,
+  file.path(
+    immune_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_xCell_boxplots"
+    )
+  ),
+  width = 15,
+  height = 12
+)
+
+
+#==============================================================================
+# 31. MCP-counter boxplots
+#==============================================================================
+
+mcp_boxplot <- ggplot(
+  mcp_long,
+  aes(
+    x = target_group,
+    y = score,
+    fill = target_group
+  )
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA,
+    alpha = 0.75
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 0.7,
+    alpha = 0.35
+  ) +
+  facet_wrap(
+    ~ cell_type,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Low" = "blue",
+      "High" = "red"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      " MCP-counter"
+    ),
+    subtitle = paste0(
+      target_gene,
+      "-high vs ",
+      target_gene,
+      "-low"
+    ),
+    x = NULL,
+    y = "MCP-counter score",
+    fill = target_gene
+  ) +
+  theme_classic(
+    base_size = 11
+  ) +
+  theme(
+    legend.position = "top"
+  )
+
+# Display plot.
+print(
+  mcp_boxplot
+)
+
+# Save plot.
+save_ggplot(
+  mcp_boxplot,
+  file.path(
+    immune_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_MCPcounter_boxplots"
+    )
+  ),
+  width = 11,
+  height = 9
+)
+
+
+#==============================================================================
+# 32. ESTIMATE boxplots
+#==============================================================================
+
+estimate_boxplot <- ggplot(
+  estimate_long,
+  aes(
+    x = target_group,
+    y = score,
+    fill = target_group
+  )
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA,
+    alpha = 0.75
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 0.9,
+    alpha = 0.40
+  ) +
+  facet_wrap(
+    ~ cell_type,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Low" = "blue",
+      "High" = "red"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      " ESTIMATE"
+    ),
+    subtitle = paste0(
+      target_gene,
+      "-high vs ",
+      target_gene,
+      "-low"
+    ),
+    x = NULL,
+    y = "ESTIMATE score",
+    fill = target_gene
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    legend.position = "top"
+  )
+
+# Display plot.
+print(
+  estimate_boxplot
+)
+
+# Save plot.
+save_ggplot(
+  estimate_boxplot,
+  file.path(
+    immune_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_ESTIMATE_boxplots"
+    )
+  ),
+  width = 9,
+  height = 7
+)
+
+
+#==============================================================================
+# 33. Target-gene vs xCell correlations
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "TARGET GENE vs xCELL CORRELATIONS\n",
+  "============================================================\n"
+)
+
+xcell_correlations <- xcell_long %>%
+  dplyr::group_by(
+    cell_type
+  ) %>%
+  dplyr::group_modify(
+    ~ safe_spearman(
+      .x$target_expression,
+      .x$score
+    )
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    p_adjusted = p.adjust(
+      p_value,
+      method = "BH"
+    ),
+    direction = dplyr::case_when(
+      correlation > 0 ~ "Positive",
+      correlation < 0 ~ "Negative",
+      TRUE ~ "None"
+    ),
+    minus_log10_fdr = -log10(
+      pmax(
+        p_adjusted,
+        .Machine$double.xmin
+      )
+    )
+  ) %>%
+  dplyr::arrange(
+    correlation
+  )
+
+cat(
+  "\nxCell correlations:\n\n"
+)
+
+print(
+  xcell_correlations
+)
+
+write.csv(
+  xcell_correlations,
+  file.path(
+    correlation_results_directory,
+    paste0(
+      analysis_prefix,
+      "_xCell_correlations.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 34. xCell correlation dot plot
+#==============================================================================
+
+xcell_correlation_plot_data <- xcell_correlations %>%
+  dplyr::filter(
+    !is.na(correlation),
+    !is.na(p_adjusted)
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste0(
+      cell_type,
+      " | R = ",
+      sprintf(
+        "%.2f",
+        correlation
+      ),
+      " | FDR = ",
+      formatC(
+        p_adjusted,
+        format = "g",
+        digits = 2
+      )
+    )
+  ) %>%
+  dplyr::arrange(
+    correlation
+  )
+
+xcell_correlation_plot_data$plot_label <- factor(
+  xcell_correlation_plot_data$plot_label,
+  levels = xcell_correlation_plot_data$plot_label
+)
+
+xcell_correlation_plot <- ggplot(
+  xcell_correlation_plot_data,
+  aes(
+    x = correlation,
+    y = plot_label,
+    size = minus_log10_fdr,
+    color = direction
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_point(
+    alpha = 0.9
+  ) +
+  scale_color_manual(
+    values = c(
+      "Positive" = "red",
+      "Negative" = "blue",
+      "None" = "grey"
+    )
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      ": ",
+      target_gene,
+      " vs xCell"
+    ),
+    x = "Spearman correlation",
+    y = NULL,
+    size = "-log10 FDR",
+    color = NULL
+  ) +
+  theme_classic(
+    base_size = 10
+  ) +
+  theme(
+    plot.title = element_text(
+      face = "bold"
+    )
+  )
+
+# Display plot.
+print(
+  xcell_correlation_plot
+)
+
+# Save plot.
+save_ggplot(
+  xcell_correlation_plot,
+  file.path(
+    correlation_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_xCell_correlations"
+    )
+  ),
+  width = 11,
+  height = 12
+)
+
+
+#==============================================================================
+# 35. Myeloid-focused xCell correlations
+#==============================================================================
+
+myeloid_pattern <- paste(
+  c(
+    "macrophage",
+    "monocyte",
+    "microglia",
+    "dendritic"
+  ),
+  collapse = "|"
+)
+
+xcell_myeloid <- xcell_correlation_plot_data %>%
+  dplyr::filter(
+    grepl(
+      myeloid_pattern,
+      cell_type,
+      ignore.case = TRUE
+    )
+  )
+
+if (nrow(xcell_myeloid) > 0) {
+  xcell_myeloid <- xcell_myeloid %>%
+    dplyr::arrange(
+      correlation
+    )
+
+  xcell_myeloid$plot_label <- factor(
+    as.character(
+      xcell_myeloid$plot_label
+    ),
+    levels = as.character(
+      xcell_myeloid$plot_label
+    )
+  )
+
+  myeloid_plot <- ggplot(
+    xcell_myeloid,
+    aes(
+      x = correlation,
+      y = plot_label,
+      size = minus_log10_fdr,
+      color = direction
+    )
+  ) +
+    geom_vline(
+      xintercept = 0,
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+    geom_point(
+      alpha = 0.9
+    ) +
+    scale_color_manual(
+      values = c(
+        "Positive" = "red",
+        "Negative" = "blue",
+        "None" = "grey"
+      )
+    ) +
+    labs(
+      title = paste0(
+        target_gene,
+        " and myeloid signatures"
+      ),
+      subtitle = paste0(
+        "TCGA-",
+        tcga_project
+      ),
+      x = "Spearman correlation",
+      y = NULL,
+      size = "-log10 FDR",
+      color = NULL
+    ) +
+    theme_classic(
+      base_size = 11
+    )
+
+  # Display plot.
+  print(
+    myeloid_plot
+  )
+
+  # Save plot.
+  save_ggplot(
+    myeloid_plot,
+    file.path(
+      correlation_figure_directory,
+      paste0(
+        analysis_prefix,
+        "_xCell_myeloid_correlations"
+      )
+    ),
+    width = 10,
+    height = 6
+  )
+}
+
+
+#==============================================================================
+# 36. ESTIMATE / tumor-purity correlations
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "TARGET GENE vs ESTIMATE / TUMOR PURITY\n",
+  "============================================================\n"
+)
+
+estimate_correlations <- estimate_long %>%
+  dplyr::group_by(
+    cell_type
+  ) %>%
+  dplyr::group_modify(
+    ~ safe_spearman(
+      .x$target_expression,
+      .x$score
+    )
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    p_adjusted = p.adjust(
+      p_value,
+      method = "BH"
+    )
+  ) %>%
+  dplyr::arrange(
+    p_adjusted
+  )
+
+cat(
+  "\nESTIMATE / tumor-purity correlations:\n\n"
+)
+
+print(
+  estimate_correlations
+)
+
+write.csv(
+  estimate_correlations,
+  file.path(
+    correlation_results_directory,
+    paste0(
+      analysis_prefix,
+      "_ESTIMATE_purity_correlations.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 37. ESTIMATE / tumor-purity scatterplots
+#==============================================================================
+
+estimate_plot_data <- estimate_long %>%
+  dplyr::left_join(
+    estimate_correlations %>%
+      dplyr::select(
+        cell_type,
+        correlation,
+        p_adjusted
+      ),
+    by = "cell_type"
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste0(
+      cell_type,
+      "\nSpearman R = ",
+      sprintf(
+        "%.2f",
+        correlation
+      ),
+      " | FDR = ",
+      formatC(
+        p_adjusted,
+        format = "g",
+        digits = 2
+      )
+    )
+  )
+
+estimate_correlation_plot <- ggplot(
+  estimate_plot_data,
+  aes(
+    x = target_expression,
+    y = score
+  )
+) +
+  geom_point(
+    alpha = 0.6,
+    size = 1.6
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    linewidth = 0.7
+  ) +
+  facet_wrap(
+    ~ plot_label,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  labs(
+    title = paste0(
+      "TCGA-",
+      tcga_project,
+      " ",
+      target_gene,
+      " and tumor microenvironment"
+    ),
+    subtitle = "Association with ESTIMATE-derived scores",
+    x = paste0(
+      target_gene,
+      " expression"
+    ),
+    y = "ESTIMATE-derived score"
+  ) +
+  theme_classic(
+    base_size = 11
+  ) +
+  theme(
+    plot.title = element_text(
+      face = "bold"
+    )
+  )
+
+# Display plot.
+print(
+  estimate_correlation_plot
+)
+
+# Save plot.
+save_ggplot(
+  estimate_correlation_plot,
+  file.path(
+    correlation_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_ESTIMATE_purity_correlations"
+    )
+  ),
+  width = 10,
+  height = 8
+)
+
+
+#==============================================================================
+# 38. Prepare survival data
+#==============================================================================
+
+cat(
+  "\n============================================================\n",
+  "OVERALL SURVIVAL ANALYSIS\n",
+  "============================================================\n"
+)
+
+sample_column_candidates <- c(
+  "sample",
+  "_PATIENT",
+  "sampleID",
+  "SampleID",
+  "patient",
+  "bcr_patient_barcode"
+)
+
+sample_column <- sample_column_candidates[
+  sample_column_candidates %in%
+    colnames(
+      survival_data_raw
+    )
+][1]
+
+if (
+  length(sample_column) == 0 ||
+  is.na(sample_column)
+) {
+  sample_column <- colnames(
+    survival_data_raw
+  )[1]
+}
+
+required_survival_columns <- c(
+  "OS",
+  "OS.time"
+)
+
+missing_survival_columns <- setdiff(
+  required_survival_columns,
+  colnames(
+    survival_data_raw
+  )
+)
+
+if (length(missing_survival_columns) > 0) {
+  stop(
+    paste(
+      "Missing survival columns:",
+      paste(
+        missing_survival_columns,
+        collapse = ", "
+      )
+    )
+  )
+}
+
+survival_data <- survival_data_raw %>%
+  dplyr::transmute(
+    survival_sample = as.character(
+      .data[[sample_column]]
+    ),
+    patient = substr(
+      as.character(
+        .data[[sample_column]]
+      ),
+      1,
+      12
+    ),
+    OS = suppressWarnings(
+      as.numeric(
+        OS
+      )
+    ),
+    OS_time = suppressWarnings(
+      as.numeric(
+        OS.time
+      )
+    )
+  )
+
+expression_patient_data <- sample_metadata %>%
+  dplyr::arrange(
+    patient,
+    sample
+  ) %>%
+  dplyr::distinct(
+    patient,
+    .keep_all = TRUE
+  )
+
+survival_expression <- expression_patient_data %>%
+  dplyr::inner_join(
+    survival_data,
+    by = "patient"
+  ) %>%
+  dplyr::filter(
+    !is.na(OS),
+    !is.na(OS_time),
+    !is.na(target_expression),
+    OS_time > 0
+  )
+
+survival_expression$target_group <- factor(
+  survival_expression$target_group,
+  levels = c(
+    "Low",
+    "High"
+  )
+)
+
+cat(
+  "\nPatients retained: ",
+  nrow(
+    survival_expression
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Deaths: ",
+  sum(
+    survival_expression$OS == 1,
+    na.rm = TRUE
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Censored: ",
+  sum(
+    survival_expression$OS == 0,
+    na.rm = TRUE
+  ),
+  "\n",
+  sep = ""
+)
+
+write.csv(
+  survival_expression,
+  file.path(
+    survival_results_directory,
+    paste0(
+      analysis_prefix,
+      "_survival_data.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 39. Kaplan-Meier survival analysis
+#==============================================================================
+
+km_fit <- survival::survfit(
+  survival::Surv(
+    OS_time,
+    OS
+  ) ~ target_group,
+  data = survival_expression
+)
+
+logrank_test <- survival::survdiff(
+  survival::Surv(
+    OS_time,
+    OS
+  ) ~ target_group,
+  data = survival_expression
+)
+
+logrank_p <- 1 - pchisq(
+  logrank_test$chisq,
+  df = length(
+    logrank_test$n
+  ) - 1
+)
+
+cat(
+  "\nLog-rank P: ",
+  signif(
+    logrank_p,
+    4
+  ),
+  "\n",
+  sep = ""
+)
+
+km_plot <- survminer::ggsurvplot(
+  fit = km_fit,
+  data = survival_expression,
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  pval = TRUE,
+  pval.method = TRUE,
+  conf.int = FALSE,
+  censor = TRUE,
+  censor.shape = "|",
+  censor.size = 3,
+  palette = c(
+    "blue",
+    "red"
+  ),
+  legend.title = target_gene,
+  legend.labs = c(
+    "Low",
+    "High"
+  ),
+  xscale = 30.44,
+  xlab = "Overall survival (months)",
+  ylab = "Overall survival probability",
+  title = paste0(
+    "TCGA-",
+    tcga_project,
+    " overall survival"
+  ),
+  subtitle = paste0(
+    target_gene,
+    "-high vs ",
+    target_gene,
+    "-low primary tumors"
+  ),
+  ggtheme = theme_classic(
+    base_size = 13
+  )
+)
+
+# Display plot.
+print(
+  km_plot
+)
+
+# Save PNG.
+png(
+  filename = file.path(
+    survival_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_overall_survival_KM.png"
+    )
+  ),
+  width = 3000,
+  height = 2600,
+  res = 300
+)
+
+print(
+  km_plot
+)
+
+dev.off()
+
+# Save PDF.
+pdf(
+  file = file.path(
+    survival_figure_directory,
+    paste0(
+      analysis_prefix,
+      "_overall_survival_KM.pdf"
+    )
+  ),
+  width = 9,
+  height = 8
+)
+
+print(
+  km_plot
+)
+
+dev.off()
+
+
+#==============================================================================
+# 40. Cox model — high vs low
+#==============================================================================
+
+cox_group <- survival::coxph(
+  survival::Surv(
+    OS_time,
+    OS
+  ) ~ target_group,
+  data = survival_expression
+)
+
+cox_group_summary <- summary(
+  cox_group
+)
+
+group_term <- grep(
+  "^target_group",
+  rownames(
+    cox_group_summary$coefficients
+  ),
+  value = TRUE
+)[1]
+
+cox_group_results <- data.frame(
+  model = "High vs Low",
+  hazard_ratio = cox_group_summary$coefficients[
+    group_term,
+    "exp(coef)"
+  ],
+  lower_95_CI = cox_group_summary$conf.int[
+    group_term,
+    "lower .95"
+  ],
+  upper_95_CI = cox_group_summary$conf.int[
+    group_term,
+    "upper .95"
+  ],
+  p_value = cox_group_summary$coefficients[
+    group_term,
+    "Pr(>|z|)"
+  ]
+)
+
+
+#==============================================================================
+# 41. Cox model — continuous expression
+#==============================================================================
+
+survival_expression <- survival_expression %>%
+  dplyr::mutate(
+    target_expression_z = as.numeric(
+      scale(
+        target_expression
+      )
+    )
+  )
+
+cox_continuous <- survival::coxph(
+  survival::Surv(
+    OS_time,
+    OS
+  ) ~ target_expression_z,
+  data = survival_expression
+)
+
+cox_continuous_summary <- summary(
+  cox_continuous
+)
+
+cox_continuous_results <- data.frame(
+  model = "Expression per 1 SD",
+  hazard_ratio = cox_continuous_summary$coefficients[
+    "target_expression_z",
+    "exp(coef)"
+  ],
+  lower_95_CI = cox_continuous_summary$conf.int[
+    "target_expression_z",
+    "lower .95"
+  ],
+  upper_95_CI = cox_continuous_summary$conf.int[
+    "target_expression_z",
+    "upper .95"
+  ],
+  p_value = cox_continuous_summary$coefficients[
+    "target_expression_z",
+    "Pr(>|z|)"
+  ]
+)
+
+cox_results <- dplyr::bind_rows(
+  cox_group_results,
+  cox_continuous_results
+)
+
+cat(
+  "\nCox proportional hazards results:\n\n"
+)
+
+print(
+  cox_results
+)
+
+write.csv(
+  cox_results,
+  file.path(
+    survival_results_directory,
+    paste0(
+      analysis_prefix,
+      "_Cox_results.csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+
+#==============================================================================
+# 42. Proportional hazards checks
+#==============================================================================
+
+cox_group_ph <- survival::cox.zph(
+  cox_group
+)
+
+cox_continuous_ph <- survival::cox.zph(
+  cox_continuous
+)
+
+cat(
+  "\nGrouped Cox proportional-hazards test:\n\n"
+)
+
+print(
+  cox_group_ph
+)
+
+cat(
+  "\nContinuous Cox proportional-hazards test:\n\n"
+)
+
+print(
+  cox_continuous_ph
+)
+
+
+#==============================================================================
+# 43. Save complete bulk validation object
+#==============================================================================
+
+bulk_validation_results <- list(
+  settings = list(
+    tcga_project = tcga_project,
+    target_gene = target_gene,
+    target_cutpoint = target_cutpoint,
+    dea_fdr_threshold = dea_fdr_threshold,
+    dea_logfc_threshold = dea_logfc_threshold,
+    gsea_fdr_threshold = gsea_fdr_threshold
+  ),
+  clinical_data = clinical_data,
+  sample_metadata = sample_metadata,
+  expression_primary = expression_primary,
+  dea_results = dea_results,
+  hallmark_gsea = hallmark_gsea,
+  gobp_gsea = gobp_gsea,
+  immune_deconvolution = list(
+    xcell = xcell_results,
+    mcp_counter = mcp_results,
+    estimate = estimate_results
+  ),
+  immune_statistics = immune_statistics,
+  correlations = list(
+    xcell = xcell_correlations,
+    estimate = estimate_correlations
+  ),
+  survival = list(
+    data = survival_expression,
+    km_fit = km_fit,
+    logrank_p = logrank_p,
+    cox_group = cox_group,
+    cox_continuous = cox_continuous,
+    cox_results = cox_results
+  )
+)
+
+saveRDS(
+  bulk_validation_results,
+  file.path(
+    processed_data_directory,
+    paste0(
+      analysis_prefix,
+      "_bulk_validation_results.rds"
+    )
+  )
+)
+
+
+#==============================================================================
+# 44. Save session information
+#==============================================================================
+
+capture.output(
+  sessionInfo(),
+  file = file.path(
+    results_directory,
+    paste0(
+      analysis_prefix,
+      "_sessionInfo.txt"
+    )
+  )
+)
+
+
+#==============================================================================
+# 45. Final summary
+#==============================================================================
+
+cat(
+  "\n\n============================================================\n",
+  "TCGA BULK VALIDATION COMPLETE\n",
+  "============================================================\n",
+  sep = ""
+)
+
+cat(
+  "\nTCGA project: ",
+  tcga_project,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Target gene: ",
+  target_gene,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Primary tumors: ",
+  ncol(
+    expression_primary
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nDifferential expression:\n"
+)
+
+cat(
+  "  Upregulated: ",
+  sum(
+    dea_results$significance == "Up"
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Downregulated: ",
+  sum(
+    dea_results$significance == "Down"
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nGSEA:\n"
+)
+
+cat(
+  "  Significant Hallmark pathways: ",
+  sum(
+    hallmark_gsea$padj < gsea_fdr_threshold,
+    na.rm = TRUE
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Significant GOBP pathways: ",
+  sum(
+    gobp_gsea$padj < gsea_fdr_threshold,
+    na.rm = TRUE
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nxCell:\n"
+)
+
+cat(
+  "  Populations tested: ",
+  nrow(
+    xcell_correlations
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Significant correlations: ",
+  sum(
+    xcell_correlations$p_adjusted <
+      correlation_fdr_threshold,
+    na.rm = TRUE
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nESTIMATE / tumor purity:\n\n"
+)
+
+print(
+  estimate_correlations %>%
+    dplyr::select(
+      cell_type,
+      correlation,
+      p_adjusted
+    )
+)
+
+cat(
+  "\nSurvival:\n"
+)
+
+cat(
+  "  Patients: ",
+  nrow(
+    survival_expression
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Log-rank P: ",
+  signif(
+    logrank_p,
+    4
+  ),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nCox results:\n\n"
+)
+
+print(
+  cox_results
+)
+
+cat(
+  "\nRaw bulk data:\n",
+  tcga_directory,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nProcessed bulk data:\n",
+  processed_data_directory,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nBulk results:\n",
+  results_directory,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\nBulk figures:\n",
+  figures_directory,
+  "\n",
+  sep = ""
+)
+
+cat(
+  "\n============================================================\n"
+)
+```
+

@@ -1,0 +1,1832 @@
+---
+title: "Module 11: Spatial cell-type annotation with SingleR"
+output: html_document
+date: "2026-08-12"
+---
+
+```{r}
+#==============================================================================
+# MODULE 12 — Spatial SingleR annotation
+#==============================================================================
+
+# Purpose:
+#   Annotate the inferCNV-classified master spatial Seurat object generated
+#   in Module 11 using SingleR and the celldex MouseRNAseqData reference.
+#   Prepare normalized Spatial expression, identify genes shared between the
+#   spatial dataset and reference, perform fine-label SingleR annotation,
+#   transfer predicted identities back to Seurat metadata, compare SingleR
+#   identities with inferCNV malignancy annotations, generate dimensional
+#   reduction and spatial tissue maps, summarize spot composition across
+#   samples, export diagnostic tables and figures, and save a stable combined
+#   inferCNV + SingleR spatial Seurat checkpoint for downstream CARD and
+#   CellChat analyses.
+#
+# Input:
+#   data/processed/spatial/
+#     spatial_infercnv_annotated.rds
+#
+# Primary output:
+#   data/processed/spatial/
+#     spatial_tumor_final_infercnv_singleR.rds
+#
+# SingleR prediction object:
+#   data/processed/spatial/singleR/
+#     spatial_singleR_predictions.rds
+#
+# Output tables:
+#   results/spatial/singleR/
+#
+# Output figures:
+#   figures/spatial/singleR/
+#
+# SingleR settings:
+#   Reference:          celldex::MouseRNAseqData
+#   Annotation level:   label.fine
+#   Fine tuning:        TRUE
+#   Pruning:            TRUE
+#   Parallelization:    SerialParam
+#
+# Metadata added:
+#   SingleR_label
+#   SingleR_pruned
+#   SingleR_delta
+#   predicted_spot_identity
+#
+# Notes:
+#   - Spatial transcriptomics spots may contain multiple cells.
+#   - SingleR therefore identifies the predominant reference-like expression
+#     identity of each spot rather than proving that the spot contains a
+#     single pure cell type.
+#   - "Uncertain" denotes spots whose SingleR prediction was removed during
+#     pruning.
+#   - Existing Harmony-derived PCA/UMAP/t-SNE reductions from Module 07 are
+#     preserved and are NOT recalculated in this module.
+#   - Existing inferCNV annotations from Module 11 are retained unchanged.
+#==============================================================================
+
+
+#------------------------------------------------------------------------------
+# 1. Load required packages
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(SingleR)
+  library(celldex)
+  library(SingleCellExperiment)
+  library(SummarizedExperiment)
+  library(BiocParallel)
+  library(Matrix)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(scales)
+  library(here)
+})
+
+
+#------------------------------------------------------------------------------
+# 2. Reproducibility settings
+#------------------------------------------------------------------------------
+
+set.seed(1234)
+
+
+#------------------------------------------------------------------------------
+# 3. Define analysis parameters
+#------------------------------------------------------------------------------
+
+spatial_assay <- "Spatial"
+
+sample_column <- "sample"
+
+cluster_column <- "spatial_cluster"
+
+singleR_reference_label <- "label.fine"
+
+singleR_fine_tune <- TRUE
+
+singleR_prune <- TRUE
+
+minimum_shared_genes <- 1000
+
+representative_heatmap_spots <- 300
+
+normalization_scale_factor <- 10000
+
+sample_order <- c(
+  "Normal_Tissue",
+  "Vehicle_1",
+  "Vehicle_2",
+  "Niacin_Treatment"
+)
+
+required_images <- c(
+  "Naive_A9",
+  "Vehicle1_C5",
+  "Vehicle2_D5",
+  "Niacin2_B5"
+)
+
+
+#------------------------------------------------------------------------------
+# 4. Define repository paths
+#------------------------------------------------------------------------------
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "spatial"
+)
+
+singleR_object_directory <- here::here(
+  "data",
+  "processed",
+  "spatial",
+  "singleR"
+)
+
+results_directory <- here::here(
+  "results",
+  "spatial",
+  "singleR"
+)
+
+figure_directory <- here::here(
+  "figures",
+  "spatial",
+  "singleR"
+)
+
+directories_to_create <- c(
+  singleR_object_directory,
+  results_directory,
+  figure_directory
+)
+
+for (directory in directories_to_create) {
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 5. Define input and output files
+#------------------------------------------------------------------------------
+
+input_file <- file.path(
+  processed_directory,
+  "spatial_infercnv_annotated.rds"
+)
+
+final_object_file <- file.path(
+  processed_directory,
+  "spatial_tumor_final_infercnv_singleR.rds"
+)
+
+singleR_prediction_file <- file.path(
+  singleR_object_directory,
+  "spatial_singleR_predictions.rds"
+)
+
+metadata_file <- file.path(
+  results_directory,
+  "spatial_infercnv_singleR_metadata.csv"
+)
+
+gene_overlap_file <- file.path(
+  results_directory,
+  "spatial_singleR_gene_overlap.csv"
+)
+
+celltype_composition_file <- file.path(
+  results_directory,
+  "spatial_singleR_celltype_composition.csv"
+)
+
+malignancy_composition_file <- file.path(
+  results_directory,
+  "spatial_singleR_identity_by_malignancy_annotation.csv"
+)
+
+singleR_count_file <- file.path(
+  results_directory,
+  "spatial_singleR_identity_counts.csv"
+)
+
+singleR_palette_file <- file.path(
+  results_directory,
+  "spatial_singleR_color_palette.csv"
+)
+
+parameter_file <- file.path(
+  results_directory,
+  "spatial_singleR_parameters.csv"
+)
+
+session_info_file <- file.path(
+  results_directory,
+  "spatial_singleR_sessionInfo.txt"
+)
+
+
+cat(
+  "\n============================================================\n",
+  "MODULE 12 — Spatial SingleR annotation\n",
+  "============================================================\n",
+  "Repository root:      ", here::here(), "\n",
+  "Input object:         ", input_file, "\n",
+  "SingleR objects:      ", singleR_object_directory, "\n",
+  "Results directory:   ", results_directory, "\n",
+  "Figure directory:    ", figure_directory, "\n",
+  "Primary output:      ", final_object_file, "\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Validate and load Module 11 output
+#------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+  stop(
+    "Module 11 output was not found:\n",
+    input_file,
+    "\n\nRun Module 11 before Module 12."
+  )
+}
+
+cat(
+  "Loading inferCNV-annotated master spatial object...\n"
+)
+
+spatial_singleR <- readRDS(
+  input_file
+)
+
+if (!inherits(spatial_singleR, "Seurat")) {
+  stop(
+    "Loaded input file is not a valid Seurat object."
+  )
+}
+
+available_assays <- names(
+  spatial_singleR@assays
+)
+
+if (!spatial_assay %in% available_assays) {
+  stop(
+    "Required Spatial assay was not found.\n",
+    "Available assays: ",
+    paste(
+      available_assays,
+      collapse = ", "
+    )
+  )
+}
+
+required_metadata <- c(
+  sample_column,
+  cluster_column,
+  "infercnv_input_group",
+  "infercnv_score",
+  "infercnv_status",
+  "malignancy_annotation"
+)
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(spatial_singleR@meta.data)
+)
+
+if (length(missing_metadata) > 0) {
+  stop(
+    "Required metadata column(s) missing:\n",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+cat(
+  "Spatial object loaded successfully:\n",
+  "  Features: ", nrow(spatial_singleR), "\n",
+  "  Spots:    ", ncol(spatial_singleR), "\n",
+  "  Samples:  ",
+  length(
+    unique(
+      spatial_singleR@meta.data[[sample_column]]
+    )
+  ),
+  "\n",
+  "  Images:   ",
+  length(
+    Seurat::Images(
+      spatial_singleR
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Validate samples, images, and spot barcodes
+#------------------------------------------------------------------------------
+
+observed_samples <- sort(
+  unique(
+    as.character(
+      spatial_singleR@meta.data[[sample_column]]
+    )
+  )
+)
+
+missing_samples <- setdiff(
+  sample_order,
+  observed_samples
+)
+
+if (length(missing_samples) > 0) {
+  stop(
+    "Expected spatial sample(s) missing:\n",
+    paste(
+      missing_samples,
+      collapse = ", "
+    )
+  )
+}
+
+missing_images <- setdiff(
+  required_images,
+  Seurat::Images(spatial_singleR)
+)
+
+if (length(missing_images) > 0) {
+  stop(
+    "Expected spatial image(s) missing:\n",
+    paste(
+      missing_images,
+      collapse = ", "
+    )
+  )
+}
+
+if (anyDuplicated(colnames(spatial_singleR)) > 0) {
+  stop(
+    "Duplicated spatial spot barcodes were detected."
+  )
+}
+
+cat(
+  "\nSpots by sample:\n"
+)
+
+print(
+  table(
+    spatial_singleR@meta.data[[sample_column]]
+  )
+)
+
+cat(
+  "\nMalignancy annotations by sample:\n"
+)
+
+print(
+  table(
+    spatial_singleR@meta.data[[sample_column]],
+    spatial_singleR$malignancy_annotation,
+    useNA = "ifany"
+  )
+)
+
+cat(
+  "\nAvailable reductions:\n"
+)
+
+print(
+  Seurat::Reductions(
+    spatial_singleR
+  )
+)
+
+cat(
+  "\nAvailable images:\n"
+)
+
+print(
+  Seurat::Images(
+    spatial_singleR
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 8. Prepare Spatial assay for SingleR
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Preparing Spatial expression for SingleR\n",
+  "------------------------------------------------------------\n"
+)
+
+Seurat::DefaultAssay(
+  spatial_singleR
+) <- spatial_assay
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_singleR[[spatial_assay]]
+)
+
+cat(
+  "Spatial assay layers before preparation:\n"
+)
+
+print(
+  spatial_layers
+)
+
+count_layers <- grep(
+  pattern = "^counts",
+  x = spatial_layers,
+  value = TRUE
+)
+
+if (length(count_layers) == 0) {
+  stop(
+    "No raw counts layer was found in the Spatial assay."
+  )
+}
+
+if (length(count_layers) > 1) {
+  cat(
+    "\nMultiple Spatial count layers detected.\n",
+    "Joining Spatial assay layers...\n",
+    sep = ""
+  )
+
+  spatial_singleR <- SeuratObject::JoinLayers(
+    spatial_singleR,
+    assay = spatial_assay
+  )
+}
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_singleR[[spatial_assay]]
+)
+
+cat(
+  "\nSpatial assay layers after joining:\n"
+)
+
+print(
+  spatial_layers
+)
+
+
+#------------------------------------------------------------------------------
+# 9. Log-normalize Spatial assay for SingleR
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Log-normalizing Spatial assay for SingleR\n",
+  "------------------------------------------------------------\n"
+)
+
+spatial_singleR <- Seurat::NormalizeData(
+  object = spatial_singleR,
+  assay = spatial_assay,
+  normalization.method = "LogNormalize",
+  scale.factor = normalization_scale_factor,
+  verbose = FALSE
+)
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_singleR[[spatial_assay]]
+)
+
+if (!"data" %in% spatial_layers) {
+  stop(
+    "Normalized Spatial 'data' layer was not created."
+  )
+}
+
+cat(
+  "Spatial LogNormalize completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 10. Extract normalized Spatial expression
+#------------------------------------------------------------------------------
+
+spatial_logcounts <- SeuratObject::LayerData(
+  object = spatial_singleR,
+  assay = spatial_assay,
+  layer = "data"
+)
+
+if (nrow(spatial_logcounts) == 0 ||
+    ncol(spatial_logcounts) == 0) {
+  stop(
+    "Normalized Spatial expression matrix is empty."
+  )
+}
+
+missing_spots <- setdiff(
+  colnames(spatial_singleR),
+  colnames(spatial_logcounts)
+)
+
+if (length(missing_spots) > 0) {
+  stop(
+    length(missing_spots),
+    " master spatial spots are missing from the normalized matrix."
+  )
+}
+
+spatial_logcounts <- spatial_logcounts[
+  ,
+  colnames(spatial_singleR),
+  drop = FALSE
+]
+
+if (!identical(
+  colnames(spatial_logcounts),
+  colnames(spatial_singleR)
+)) {
+  stop(
+    "Normalized Spatial matrix could not be aligned to Seurat spot order."
+  )
+}
+
+cat(
+  "\nNormalized Spatial expression:\n",
+  "  Genes: ", nrow(spatial_logcounts), "\n",
+  "  Spots: ", ncol(spatial_logcounts), "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 11. Construct SingleCellExperiment
+#------------------------------------------------------------------------------
+
+spatial_sce <- SingleCellExperiment::SingleCellExperiment(
+  assays = list(
+    logcounts = spatial_logcounts
+  )
+)
+
+if (!identical(
+  colnames(spatial_sce),
+  colnames(spatial_singleR)
+)) {
+  stop(
+    "SingleCellExperiment spot order does not match Seurat spot order."
+  )
+}
+
+cat(
+  "SingleCellExperiment created successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 12. Load celldex MouseRNAseqData reference
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Loading celldex MouseRNAseqData reference\n",
+  "------------------------------------------------------------\n"
+)
+
+mouse_reference <- celldex::MouseRNAseqData()
+
+if (nrow(mouse_reference) == 0 ||
+    ncol(mouse_reference) == 0) {
+  stop(
+    "MouseRNAseqData reference was empty."
+  )
+}
+
+reference_metadata <- SummarizedExperiment::colData(
+  mouse_reference
+)
+
+if (!singleR_reference_label %in% colnames(reference_metadata)) {
+  stop(
+    "Requested reference label was not found: ",
+    singleR_reference_label
+  )
+}
+
+cat(
+  "MouseRNAseqData loaded successfully:\n",
+  "  Reference genes:   ", nrow(mouse_reference), "\n",
+  "  Reference samples: ", ncol(mouse_reference), "\n",
+  "  Fine labels:       ",
+  length(
+    unique(
+      mouse_reference$label.fine
+    )
+  ),
+  "\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 13. Match genes between spatial data and reference
+#------------------------------------------------------------------------------
+
+common_genes <- intersect(
+  rownames(spatial_sce),
+  rownames(mouse_reference)
+)
+
+shared_gene_percent <- 100 *
+  length(common_genes) /
+  nrow(spatial_sce)
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Spatial-reference gene overlap\n",
+  "------------------------------------------------------------\n",
+  "Spatial genes:     ", nrow(spatial_sce), "\n",
+  "Reference genes:   ", nrow(mouse_reference), "\n",
+  "Shared genes:      ", length(common_genes), "\n",
+  "Spatial overlap:   ",
+  round(
+    shared_gene_percent,
+    2
+  ),
+  "%\n",
+  sep = ""
+)
+
+if (length(common_genes) == 0) {
+  stop(
+    "No genes overlap between the spatial data and MouseRNAseqData."
+  )
+}
+
+if (length(common_genes) < minimum_shared_genes) {
+  warning(
+    "Only ",
+    length(common_genes),
+    " shared genes were detected between spatial and reference datasets."
+  )
+}
+
+spatial_sce_singleR <- spatial_sce[
+  common_genes,
+]
+
+mouse_reference_singleR <- mouse_reference[
+  common_genes,
+]
+
+gene_overlap_summary <- data.frame(
+  spatial_genes = nrow(spatial_sce),
+  reference_genes = nrow(mouse_reference),
+  shared_genes = length(common_genes),
+  spatial_overlap_percent = shared_gene_percent
+)
+
+utils::write.csv(
+  gene_overlap_summary,
+  gene_overlap_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 14. Run fine-label SingleR annotation
+#------------------------------------------------------------------------------
+
+cat(
+  "\n============================================================\n",
+  "Running spatial SingleR annotation\n",
+  "============================================================\n",
+  "Reference:       MouseRNAseqData\n",
+  "Label:           ", singleR_reference_label, "\n",
+  "Fine tuning:     ", singleR_fine_tune, "\n",
+  "Pruning:         ", singleR_prune, "\n",
+  "Shared genes:    ", length(common_genes), "\n",
+  "Spatial spots:   ", ncol(spatial_sce_singleR), "\n",
+  "============================================================\n\n",
+  sep = ""
+)
+
+singleR_spot <- SingleR::SingleR(
+  test = spatial_sce_singleR,
+  ref = mouse_reference_singleR,
+  labels = mouse_reference_singleR$label.fine,
+  assay.type.test = "logcounts",
+  assay.type.ref = "logcounts",
+  fine.tune = singleR_fine_tune,
+  prune = singleR_prune,
+  BPPARAM = BiocParallel::SerialParam()
+)
+
+if (nrow(singleR_spot) != ncol(spatial_singleR)) {
+  stop(
+    "SingleR prediction count does not match the number of spatial spots."
+  )
+}
+
+cat(
+  "Spatial SingleR annotation completed successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 15. Align SingleR predictions to Seurat spot barcodes
+#------------------------------------------------------------------------------
+
+if (!setequal(
+  rownames(singleR_spot),
+  colnames(spatial_singleR)
+)) {
+  stop(
+    "SingleR prediction barcodes do not match Seurat spot barcodes."
+  )
+}
+
+singleR_spot <- singleR_spot[
+  colnames(spatial_singleR),
+]
+
+if (!identical(
+  rownames(singleR_spot),
+  colnames(spatial_singleR)
+)) {
+  stop(
+    "SingleR predictions could not be reordered to Seurat spot order."
+  )
+}
+
+cat(
+  "SingleR prediction barcodes match Seurat spots exactly.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 16. Add SingleR predictions to Seurat metadata
+#------------------------------------------------------------------------------
+
+spatial_singleR$SingleR_label <- as.character(
+  singleR_spot$labels
+)
+
+spatial_singleR$SingleR_pruned <- as.character(
+  singleR_spot$pruned.labels
+)
+
+spatial_singleR$SingleR_delta <- as.numeric(
+  singleR_spot$delta.next
+)
+
+spatial_singleR$predicted_spot_identity <- ifelse(
+  is.na(spatial_singleR$SingleR_pruned),
+  "Uncertain",
+  spatial_singleR$SingleR_pruned
+)
+
+cat(
+  "\nPredicted predominant spatial identities:\n"
+)
+
+print(
+  sort(
+    table(
+      spatial_singleR$predicted_spot_identity,
+      useNA = "ifany"
+    ),
+    decreasing = TRUE
+  )
+)
+
+cat(
+  "\nSingleR identity by sample:\n"
+)
+
+print(
+  table(
+    spatial_singleR@meta.data[[sample_column]],
+    spatial_singleR$predicted_spot_identity,
+    useNA = "ifany"
+  )
+)
+
+cat(
+  "\nSingleR identity versus inferCNV malignancy annotation:\n"
+)
+
+print(
+  table(
+    spatial_singleR$malignancy_annotation,
+    spatial_singleR$predicted_spot_identity,
+    useNA = "ifany"
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 17. Save raw SingleR prediction object
+#------------------------------------------------------------------------------
+
+saveRDS(
+  object = singleR_spot,
+  file = singleR_prediction_file,
+  compress = TRUE
+)
+
+if (!file.exists(singleR_prediction_file)) {
+  stop(
+    "Spatial SingleR prediction object was not saved successfully."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 18. Save SingleR identity-count table
+#------------------------------------------------------------------------------
+
+singleR_identity_counts <- spatial_singleR@meta.data %>%
+  dplyr::count(
+    predicted_spot_identity,
+    name = "spots"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(
+      spots
+    )
+  )
+
+utils::write.csv(
+  singleR_identity_counts,
+  singleR_count_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 19. Generate representative SingleR score heatmap
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Generating representative SingleR score heatmap\n",
+  "------------------------------------------------------------\n"
+)
+
+set.seed(1234)
+
+n_heatmap_spots <- min(
+  representative_heatmap_spots,
+  nrow(singleR_spot)
+)
+
+selected_spots <- sample(
+  rownames(singleR_spot),
+  size = n_heatmap_spots,
+  replace = FALSE
+)
+
+score_heatmap_file <- file.path(
+  figure_directory,
+  "spatial_singleR_score_heatmap_representative_spots.png"
+)
+
+grDevices::png(
+  filename = score_heatmap_file,
+  width = 3000,
+  height = 2400,
+  res = 300
+)
+
+SingleR::plotScoreHeatmap(
+  singleR_spot[
+    selected_spots,
+  ]
+)
+
+grDevices::dev.off()
+
+cat(
+  "Representative score heatmap saved for ",
+  n_heatmap_spots,
+  " spatial spots.\n",
+  sep = ""
+)
+
+
+#------------------------------------------------------------------------------
+# 20. Create consistent SingleR color palette
+#------------------------------------------------------------------------------
+
+spot_identities <- sort(
+  unique(
+    spatial_singleR$predicted_spot_identity
+  )
+)
+
+singleR_colors <- stats::setNames(
+  scales::hue_pal()(
+    length(spot_identities)
+  ),
+  spot_identities
+)
+
+singleR_palette <- data.frame(
+  predicted_spot_identity = names(singleR_colors),
+  color = unname(singleR_colors),
+  stringsAsFactors = FALSE
+)
+
+utils::write.csv(
+  singleR_palette,
+  singleR_palette_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 21. Validate existing dimensional reductions
+#------------------------------------------------------------------------------
+
+available_reductions <- Seurat::Reductions(
+  spatial_singleR
+)
+
+required_reductions <- c(
+  "umap",
+  "tsne"
+)
+
+missing_reductions <- setdiff(
+  required_reductions,
+  available_reductions
+)
+
+if (length(missing_reductions) > 0) {
+  stop(
+    "Required upstream dimensional reduction(s) missing:\n",
+    paste(
+      missing_reductions,
+      collapse = ", "
+    ),
+    "\nRun Module 07 before Module 12."
+  )
+}
+
+cat(
+  "\nExisting upstream reductions retained:\n"
+)
+
+print(
+  available_reductions
+)
+
+
+#------------------------------------------------------------------------------
+# 22. Generate UMAP and t-SNE by SingleR identity
+#------------------------------------------------------------------------------
+
+singleR_umap <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "umap",
+  group.by = "predicted_spot_identity",
+  cols = singleR_colors,
+  label = TRUE,
+  repel = TRUE,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "UMAP — SingleR Predominant Spot Identity"
+  ) +
+  ggplot2::theme(
+    legend.title = ggplot2::element_blank()
+  )
+
+singleR_tsne <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "tsne",
+  group.by = "predicted_spot_identity",
+  cols = singleR_colors,
+  label = TRUE,
+  repel = TRUE,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "t-SNE — SingleR Predominant Spot Identity"
+  ) +
+  ggplot2::theme(
+    legend.title = ggplot2::element_blank()
+  )
+
+singleR_umap_file <- file.path(
+  figure_directory,
+  "spatial_singleR_UMAP.png"
+)
+
+singleR_tsne_file <- file.path(
+  figure_directory,
+  "spatial_singleR_tSNE.png"
+)
+
+singleR_reduction_file <- file.path(
+  figure_directory,
+  "spatial_singleR_UMAP_tSNE_combined.png"
+)
+
+ggplot2::ggsave(
+  filename = singleR_umap_file,
+  plot = singleR_umap,
+  width = 10,
+  height = 8,
+  dpi = 600
+)
+
+ggplot2::ggsave(
+  filename = singleR_tsne_file,
+  plot = singleR_tsne,
+  width = 10,
+  height = 8,
+  dpi = 600
+)
+
+singleR_reduction_plot <- (
+  singleR_umap |
+  singleR_tsne
+)
+
+ggplot2::ggsave(
+  filename = singleR_reduction_file,
+  plot = singleR_reduction_plot,
+  width = 20,
+  height = 8,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 23. Generate UMAP and t-SNE by spatial cluster
+#------------------------------------------------------------------------------
+
+cluster_umap <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "umap",
+  group.by = cluster_column,
+  label = TRUE,
+  repel = TRUE,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "UMAP — Spatial Cluster"
+  )
+
+cluster_tsne <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "tsne",
+  group.by = cluster_column,
+  label = TRUE,
+  repel = TRUE,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "t-SNE — Spatial Cluster"
+  )
+
+cluster_reduction_plot <- (
+  cluster_umap |
+  cluster_tsne
+)
+
+cluster_reduction_file <- file.path(
+  figure_directory,
+  "spatial_singleR_reductions_by_cluster.png"
+)
+
+ggplot2::ggsave(
+  filename = cluster_reduction_file,
+  plot = cluster_reduction_plot,
+  width = 18,
+  height = 8,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 24. Generate UMAP and t-SNE by sample
+#------------------------------------------------------------------------------
+
+sample_umap <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "umap",
+  group.by = sample_column,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "UMAP — Sample"
+  )
+
+sample_tsne <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "tsne",
+  group.by = sample_column,
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "t-SNE — Sample"
+  )
+
+sample_reduction_plot <- (
+  sample_umap |
+  sample_tsne
+)
+
+sample_reduction_file <- file.path(
+  figure_directory,
+  "spatial_singleR_reductions_by_sample.png"
+)
+
+ggplot2::ggsave(
+  filename = sample_reduction_file,
+  plot = sample_reduction_plot,
+  width = 18,
+  height = 8,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 25. Generate UMAP and t-SNE by inferCNV malignancy annotation
+#------------------------------------------------------------------------------
+
+malignancy_umap <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "umap",
+  group.by = "malignancy_annotation",
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "UMAP — inferCNV Malignancy Annotation"
+  )
+
+malignancy_tsne <- Seurat::DimPlot(
+  spatial_singleR,
+  reduction = "tsne",
+  group.by = "malignancy_annotation",
+  pt.size = 0.5
+) +
+  ggplot2::labs(
+    title = "t-SNE — inferCNV Malignancy Annotation"
+  )
+
+malignancy_reduction_plot <- (
+  malignancy_umap |
+  malignancy_tsne
+)
+
+malignancy_reduction_file <- file.path(
+  figure_directory,
+  "spatial_singleR_reductions_by_malignancy_annotation.png"
+)
+
+ggplot2::ggsave(
+  filename = malignancy_reduction_file,
+  plot = malignancy_reduction_plot,
+  width = 18,
+  height = 8,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 26. Generate individual spatial SingleR maps
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Generating spatial SingleR maps\n",
+  "------------------------------------------------------------\n"
+)
+
+spatial_map_settings <- data.frame(
+  sample = c(
+    "Normal_Tissue",
+    "Vehicle_1",
+    "Vehicle_2",
+    "Niacin_Treatment"
+  ),
+  image = c(
+    "Naive_A9",
+    "Vehicle1_C5",
+    "Vehicle2_D5",
+    "Niacin2_B5"
+  ),
+  title = c(
+    "Normal Tissue",
+    "Vehicle 1",
+    "Vehicle 2",
+    "Niacin Treatment"
+  ),
+  stringsAsFactors = FALSE
+)
+
+singleR_spatial_plots <- list()
+
+singleR_spatial_files <- character(0)
+
+for (i in seq_len(nrow(spatial_map_settings))) {
+  sample_name <- spatial_map_settings$sample[i]
+
+  image_name <- spatial_map_settings$image[i]
+
+  plot_title <- spatial_map_settings$title[i]
+
+  if (!image_name %in% Seurat::Images(spatial_singleR)) {
+    warning(
+      "Spatial image was not available: ",
+      image_name
+    )
+
+    next
+  }
+
+  current_plot <- Seurat::SpatialDimPlot(
+    object = spatial_singleR,
+    images = image_name,
+    group.by = "predicted_spot_identity",
+    cols = singleR_colors,
+    pt.size.factor = 1.6,
+    alpha = 1,
+    stroke = 0
+  ) +
+    ggplot2::labs(
+      title = plot_title
+    ) +
+    ggplot2::theme(
+      legend.title = ggplot2::element_blank()
+    )
+
+  current_file <- file.path(
+    figure_directory,
+    paste0(
+      "spatial_singleR_",
+      sample_name,
+      ".png"
+    )
+  )
+
+  ggplot2::ggsave(
+    filename = current_file,
+    plot = current_plot,
+    width = 8,
+    height = 8,
+    dpi = 600
+  )
+
+  singleR_spatial_plots[[sample_name]] <- current_plot
+
+  singleR_spatial_files <- c(
+    singleR_spatial_files,
+    current_file
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 27. Generate combined four-slide spatial SingleR map
+#------------------------------------------------------------------------------
+
+combined_spatial_file <- NULL
+
+if (length(singleR_spatial_plots) > 0) {
+  combined_spatial_plot <- patchwork::wrap_plots(
+    singleR_spatial_plots,
+    ncol = 2,
+    guides = "collect"
+  ) &
+    ggplot2::theme(
+      legend.position = "right",
+      legend.title = ggplot2::element_blank()
+    )
+
+  combined_spatial_file <- file.path(
+    figure_directory,
+    "spatial_singleR_all_samples.png"
+  )
+
+  ggplot2::ggsave(
+    filename = combined_spatial_file,
+    plot = combined_spatial_plot,
+    width = 18,
+    height = 14,
+    dpi = 600,
+    limitsize = FALSE
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 28. Calculate SingleR spot composition by sample
+#------------------------------------------------------------------------------
+
+celltype_composition <- spatial_singleR@meta.data %>%
+  dplyr::count(
+    sample,
+    predicted_spot_identity,
+    name = "n_spots"
+  ) %>%
+  dplyr::group_by(
+    sample
+  ) %>%
+  dplyr::mutate(
+    proportion = n_spots /
+      sum(n_spots),
+    percent = proportion * 100
+  ) %>%
+  dplyr::ungroup()
+
+celltype_composition$sample <- factor(
+  celltype_composition$sample,
+  levels = sample_order
+)
+
+cat(
+  "\nSingleR composition by sample:\n"
+)
+
+print(
+  celltype_composition
+)
+
+utils::write.csv(
+  celltype_composition,
+  celltype_composition_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 29. Plot SingleR spot composition by sample
+#------------------------------------------------------------------------------
+
+celltype_composition_plot <- ggplot2::ggplot(
+  celltype_composition,
+  ggplot2::aes(
+    x = sample,
+    y = proportion,
+    fill = predicted_spot_identity
+  )
+) +
+  ggplot2::geom_col(
+    width = 0.75
+  ) +
+  ggplot2::scale_fill_manual(
+    values = singleR_colors
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = scales::percent_format()
+  ) +
+  ggplot2::labs(
+    title = "SingleR Spot Composition by Sample",
+    x = NULL,
+    y = "Proportion of spatial spots",
+    fill = "Predicted identity"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    axis.text.x = ggplot2::element_text(
+      angle = 30,
+      hjust = 1
+    ),
+    legend.title = ggplot2::element_blank()
+  )
+
+celltype_composition_plot_file <- file.path(
+  figure_directory,
+  "spatial_singleR_celltype_composition.png"
+)
+
+ggplot2::ggsave(
+  filename = celltype_composition_plot_file,
+  plot = celltype_composition_plot,
+  width = 11,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 30. Calculate SingleR identity by malignancy annotation
+#------------------------------------------------------------------------------
+
+singleR_malignancy_composition <- spatial_singleR@meta.data %>%
+  dplyr::count(
+    malignancy_annotation,
+    predicted_spot_identity,
+    name = "n_spots"
+  ) %>%
+  dplyr::group_by(
+    malignancy_annotation
+  ) %>%
+  dplyr::mutate(
+    proportion = n_spots /
+      sum(n_spots),
+    percent = proportion * 100
+  ) %>%
+  dplyr::ungroup()
+
+cat(
+  "\nSingleR composition by malignancy annotation:\n"
+)
+
+print(
+  singleR_malignancy_composition
+)
+
+utils::write.csv(
+  singleR_malignancy_composition,
+  malignancy_composition_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 31. Plot SingleR identity by malignancy annotation
+#------------------------------------------------------------------------------
+
+singleR_malignancy_plot <- ggplot2::ggplot(
+  singleR_malignancy_composition,
+  ggplot2::aes(
+    x = malignancy_annotation,
+    y = proportion,
+    fill = predicted_spot_identity
+  )
+) +
+  ggplot2::geom_col(
+    width = 0.75
+  ) +
+  ggplot2::scale_fill_manual(
+    values = singleR_colors
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = scales::percent_format()
+  ) +
+  ggplot2::labs(
+    title = "SingleR Identity by inferCNV Malignancy Annotation",
+    x = NULL,
+    y = "Proportion of spatial spots",
+    fill = "Predicted identity"
+  ) +
+  ggplot2::theme_classic(
+    base_size = 12
+  ) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    axis.text.x = ggplot2::element_text(
+      angle = 30,
+      hjust = 1
+    ),
+    legend.title = ggplot2::element_blank()
+  )
+
+singleR_malignancy_plot_file <- file.path(
+  figure_directory,
+  "spatial_singleR_identity_by_malignancy_annotation.png"
+)
+
+ggplot2::ggsave(
+  filename = singleR_malignancy_plot_file,
+  plot = singleR_malignancy_plot,
+  width = 12,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 32. Save SingleR analysis parameters
+#------------------------------------------------------------------------------
+
+singleR_parameters <- data.frame(
+  parameter = c(
+    "spatial_assay",
+    "reference",
+    "reference_label",
+    "normalization_method",
+    "normalization_scale_factor",
+    "fine_tune",
+    "prune",
+    "minimum_shared_genes_warning",
+    "representative_heatmap_spots",
+    "dimensional_reductions"
+  ),
+  value = c(
+    spatial_assay,
+    "celldex::MouseRNAseqData",
+    singleR_reference_label,
+    "LogNormalize",
+    normalization_scale_factor,
+    singleR_fine_tune,
+    singleR_prune,
+    minimum_shared_genes,
+    representative_heatmap_spots,
+    "Existing Module 07 Harmony UMAP/t-SNE retained"
+  ),
+  stringsAsFactors = FALSE
+)
+
+utils::write.csv(
+  singleR_parameters,
+  parameter_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 33. Validate final SingleR metadata
+#------------------------------------------------------------------------------
+
+cat(
+  "\n------------------------------------------------------------\n",
+  "Validating final inferCNV + SingleR spatial object\n",
+  "------------------------------------------------------------\n"
+)
+
+required_final_metadata <- c(
+  "sample",
+  "infercnv_input_group",
+  "infercnv_score",
+  "infercnv_status",
+  "malignancy_annotation",
+  "SingleR_label",
+  "SingleR_pruned",
+  "SingleR_delta",
+  "predicted_spot_identity"
+)
+
+missing_final_metadata <- setdiff(
+  required_final_metadata,
+  colnames(spatial_singleR@meta.data)
+)
+
+if (length(missing_final_metadata) > 0) {
+  stop(
+    "Final spatial object is missing metadata column(s):\n",
+    paste(
+      missing_final_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+if (any(is.na(
+  spatial_singleR$predicted_spot_identity
+))) {
+  stop(
+    "Missing predicted_spot_identity values were detected."
+  )
+}
+
+if (anyDuplicated(colnames(spatial_singleR)) > 0) {
+  stop(
+    "Duplicated spatial spot barcodes detected in final object."
+  )
+}
+
+missing_final_images <- setdiff(
+  required_images,
+  Seurat::Images(spatial_singleR)
+)
+
+if (length(missing_final_images) > 0) {
+  stop(
+    "Spatial image(s) missing from final object:\n",
+    paste(
+      missing_final_images,
+      collapse = ", "
+    )
+  )
+}
+
+cat(
+  "Final inferCNV + SingleR spatial object validation passed.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 34. Save final master spatial Seurat object
+#------------------------------------------------------------------------------
+
+saveRDS(
+  object = spatial_singleR,
+  file = final_object_file,
+  compress = TRUE
+)
+
+if (!file.exists(final_object_file)) {
+  stop(
+    "Final SingleR-annotated spatial Seurat object was not saved successfully."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 35. Export complete final metadata
+#------------------------------------------------------------------------------
+
+final_metadata <- spatial_singleR@meta.data
+
+final_metadata$spot <- rownames(
+  final_metadata
+)
+
+utils::write.csv(
+  final_metadata,
+  metadata_file,
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 36. Save session information
+#------------------------------------------------------------------------------
+
+writeLines(
+  capture.output(
+    sessionInfo()
+  ),
+  con = session_info_file
+)
+
+
+#------------------------------------------------------------------------------
+# 37. Validate expected Module 12 outputs
+#------------------------------------------------------------------------------
+
+expected_object_files <- c(
+  final_object_file,
+  singleR_prediction_file
+)
+
+expected_result_files <- c(
+  metadata_file,
+  gene_overlap_file,
+  celltype_composition_file,
+  malignancy_composition_file,
+  singleR_count_file,
+  singleR_palette_file,
+  parameter_file,
+  session_info_file
+)
+
+expected_figure_files <- c(
+  score_heatmap_file,
+  singleR_umap_file,
+  singleR_tsne_file,
+  singleR_reduction_file,
+  cluster_reduction_file,
+  sample_reduction_file,
+  malignancy_reduction_file,
+  singleR_spatial_files,
+  celltype_composition_plot_file,
+  singleR_malignancy_plot_file
+)
+
+if (!is.null(combined_spatial_file)) {
+  expected_figure_files <- c(
+    expected_figure_files,
+    combined_spatial_file
+  )
+}
+
+missing_object_files <- expected_object_files[
+  !file.exists(expected_object_files)
+]
+
+missing_result_files <- expected_result_files[
+  !file.exists(expected_result_files)
+]
+
+missing_figure_files <- expected_figure_files[
+  !file.exists(expected_figure_files)
+]
+
+if (length(missing_object_files) > 0) {
+  stop(
+    "One or more expected Module 12 object files were not created:\n",
+    paste(
+      missing_object_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_result_files) > 0) {
+  stop(
+    "One or more expected Module 12 result files were not created:\n",
+    paste(
+      missing_result_files,
+      collapse = "\n"
+    )
+  )
+}
+
+if (length(missing_figure_files) > 0) {
+  stop(
+    "One or more expected Module 12 figure files were not created:\n",
+    paste(
+      missing_figure_files,
+      collapse = "\n"
+    )
+  )
+}
+
+cat(
+  "All expected Module 12 outputs were created successfully.\n"
+)
+
+
+#------------------------------------------------------------------------------
+# 38. Final module summary
+#------------------------------------------------------------------------------
+
+uncertain_spots <- sum(
+  spatial_singleR$predicted_spot_identity ==
+    "Uncertain"
+)
+
+malignant_spots <- sum(
+  spatial_singleR$malignancy_annotation ==
+    "Malignant-enriched",
+  na.rm = TRUE
+)
+
+cat(
+  "\n============================================================\n",
+  "MODULE 12 COMPLETE — Spatial SingleR annotation\n",
+  "============================================================\n",
+  "Spatial spots annotated:   ", ncol(spatial_singleR), "\n",
+  "Samples:                   ",
+  length(
+    unique(
+      spatial_singleR$sample
+    )
+  ),
+  "\n",
+  "Predicted identities:      ",
+  length(
+    unique(
+      spatial_singleR$predicted_spot_identity
+    )
+  ),
+  "\n",
+  "Shared reference genes:    ", length(common_genes), "\n",
+  "Uncertain spots:           ", uncertain_spots, "\n",
+  "Malignant-enriched spots:  ", malignant_spots, "\n",
+  "Reference:                 MouseRNAseqData\n",
+  "Annotation level:          label.fine\n",
+  "\n",
+  "Primary downstream object:\n",
+  "  ", final_object_file, "\n",
+  "\n",
+  "SingleR prediction object:\n",
+  "  ", singleR_prediction_file, "\n",
+  "\n",
+  "SingleR result tables:\n",
+  "  ", results_directory, "\n",
+  "\n",
+  "SingleR figures:\n",
+  "  ", figure_directory, "\n",
+  "\n",
+  "Next modules:\n",
+  "  Spatial CellChat and CARD deconvolution\n",
+  "============================================================\n\n",
+  sep = ""
+)
+```
+

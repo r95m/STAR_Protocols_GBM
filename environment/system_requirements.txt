@@ -1,0 +1,33 @@
+STAR Protocols GBM Analysis Workflow
+System requirements
+
+Operating system
+macOS on Apple Silicon
+
+R
+R version: 4.6.1
+
+Bioconductor
+Bioconductor version: 3.23
+
+External system dependencies
+
+JAGS
+Version: 4.3.2
+Required by: rjags and inferCNV
+
+Fortran compiler
+gfortran 14.2.0
+Required for compilation of selected R packages on macOS.
+
+Package environment
+R package versions are recorded in renv.lock.
+
+Environment restoration
+Install renv and run:
+renv::restore()
+
+Important note
+renv restores R packages but does not install external system software.
+JAGS and any required system compilers must be installed separately before
+packages such as rjags and inferCNV can be used.
