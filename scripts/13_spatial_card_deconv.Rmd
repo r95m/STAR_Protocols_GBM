@@ -6,7 +6,7 @@ date: "2026-08-12"
 
 ```{r}
 #==============================================================================
-# MODULE 14 — Spatial CARD cell-type deconvolution
+# MODULE 13 — Spatial CARD cell-type deconvolution
 #==============================================================================
 
 # Purpose:
@@ -26,7 +26,7 @@ date: "2026-08-12"
 #     GSE298688_SingleR_annotated_seurat.rds
 #
 #   data/processed/spatial/
-#     spatial_tumor_final_infercnV_singleR.rds
+#     spatial_tumor_final_infercnv_singleR.rds
 #
 # Primary CARD objects:
 #   data/processed/spatial/CARD/
@@ -117,15 +117,15 @@ spatial_sample_column <- "sample"
 
 minimum_shared_genes <- 1000
 
-card_min_count_gene <- 200
+CARD_min_count_gene <- 200
 
-card_min_count_spot <- 50
+CARD_min_count_spot <- 50
 
-run_card_imputation <- FALSE
+run_CARD_imputation <- FALSE
 
-card_num_grids <- 2000
+CARD_num_grids <- 2000
 
-card_num_neighbors <- 10
+CARD_num_neighbors <- 10
 
 
 sample_order <- c(
@@ -152,7 +152,7 @@ sample_titles <- c(
 )
 
 
-selected_card_cell_types <- c(
+selected_CARD_cell_types <- c(
   "Macrophages",
   "Macrophages activated",
   "Microglia",
@@ -177,7 +177,7 @@ spatial_processed_directory <- here::here(
   "spatial"
 )
 
-card_object_directory <- here::here(
+CARD_object_directory <- here::here(
   "data",
   "processed",
   "spatial",
@@ -212,7 +212,7 @@ spatial_feature_directory <- here::here(
 
 
 directories_to_create <- c(
-  card_object_directory,
+  CARD_object_directory,
   results_directory,
   per_sample_results_directory,
   figure_directory,
@@ -242,18 +242,18 @@ spatial_file <- file.path(
   "spatial_tumor_final_infercnv_singleR.rds"
 )
 
-final_card_object_file <- file.path(
+final_CARD_object_file <- file.path(
   spatial_processed_directory,
   "spatial_tumor_final_infercnv_singleR_CARD.rds"
 )
 
-all_card_results_file <- file.path(
-  card_object_directory,
+all_CARD_results_file <- file.path(
+  CARD_object_directory,
   "spatial_CARD_all_results.rds"
 )
 
-all_card_identities_file <- file.path(
-  card_object_directory,
+all_CARD_identities_file <- file.path(
+  CARD_object_directory,
   "spatial_CARD_top3_identities.rds"
 )
 
@@ -292,11 +292,6 @@ parameter_file <- file.path(
   "CARD_parameters.csv"
 )
 
-session_info_file <- file.path(
-  results_directory,
-  "CARD_sessionInfo.txt"
-)
-
 
 cat(
   "\n============================================================\n",
@@ -305,10 +300,10 @@ cat(
   "Repository root:       ", here::here(), "\n",
   "scRNA reference:       ", reference_file, "\n",
   "Spatial input:         ", spatial_file, "\n",
-  "CARD objects:          ", card_object_directory, "\n",
+  "CARD objects:          ", CARD_object_directory, "\n",
   "Results directory:    ", results_directory, "\n",
   "Figure directory:     ", figure_directory, "\n",
-  "Final spatial object: ", final_card_object_file, "\n",
+  "Final spatial object: ", final_CARD_object_file, "\n",
   "============================================================\n\n",
   sep = ""
 )
@@ -749,7 +744,7 @@ run_CARD_sample <- function(
     spatial_assay,
     spatial_sample_column,
     image_name,
-    card_object_directory,
+    CARD_object_directory,
     per_sample_results_directory,
     min_count_gene,
     min_count_spot,
@@ -936,7 +931,7 @@ run_CARD_sample <- function(
     "Creating CARD object...\n"
   )
 
-  card_object <- CARD::createCARDObject(
+  CARD_object <- CARD::createCARDObject(
     sc_count = sc_counts,
     sc_meta = reference_metadata,
     spatial_count = spatial_counts,
@@ -957,8 +952,8 @@ run_CARD_sample <- function(
     "Running CARD deconvolution...\n"
   )
 
-  card_object <- CARD::CARD_deconvolution(
-    CARD_object = card_object
+  CARD_object <- CARD::CARD_deconvolution(
+    CARD_object = CARD_object
   )
 
 
@@ -967,7 +962,7 @@ run_CARD_sample <- function(
   #--------------------------------------------------------------------------
 
   proportions <- as.data.frame(
-    card_object@Proportion_CARD,
+    CARD_object@Proportion_CARD,
     check.names = FALSE
   )
 
@@ -1020,7 +1015,7 @@ run_CARD_sample <- function(
   )
 
   object_file <- file.path(
-    card_object_directory,
+    CARD_object_directory,
     paste0(
       sample_name,
       "_CARD_object.rds"
@@ -1051,7 +1046,7 @@ run_CARD_sample <- function(
   )
 
   saveRDS(
-    object = card_object,
+    object = CARD_object,
     file = object_file,
     compress = TRUE
   )
@@ -1082,7 +1077,7 @@ run_CARD_sample <- function(
 
   return(
     list(
-      CARD_object = card_object,
+      CARD_object = CARD_object,
       proportions = proportions,
       spatial_object = sample_object,
       image_name = image_name,
@@ -1128,10 +1123,10 @@ for (sample_name in samples_to_run) {
     spatial_assay = spatial_assay,
     spatial_sample_column = spatial_sample_column,
     image_name = sample_images[[sample_name]],
-    card_object_directory = card_object_directory,
+    CARD_object_directory = CARD_object_directory,
     per_sample_results_directory = per_sample_results_directory,
-    min_count_gene = card_min_count_gene,
-    min_count_spot = card_min_count_spot,
+    min_count_gene = CARD_min_count_gene,
+    min_count_spot = CARD_min_count_spot,
     minimum_shared_genes = minimum_shared_genes
   )
 }
@@ -1162,7 +1157,7 @@ print(
 
 saveRDS(
   object = CARD_results,
-  file = all_card_results_file,
+  file = all_CARD_results_file,
   compress = TRUE
 )
 
@@ -1381,7 +1376,7 @@ for (sample_name in names(CARD_identities)) {
 
 saveRDS(
   object = CARD_identities,
-  file = all_card_identities_file,
+  file = all_CARD_identities_file,
   compress = TRUE
 )
 
@@ -1608,7 +1603,7 @@ utils::write.csv(
 # 21. Validate CARD metadata
 #------------------------------------------------------------------------------
 
-card_columns <- grep(
+CARD_columns <- grep(
   "^CARD",
   colnames(spatial_object@meta.data),
   value = TRUE
@@ -1619,7 +1614,7 @@ cat(
 )
 
 print(
-  card_columns
+  CARD_columns
 )
 
 cat(
@@ -1829,15 +1824,15 @@ if (length(CARD_identity_plots) > 0) {
 # 27. Determine selected myeloid CARD features
 #------------------------------------------------------------------------------
 
-selected_card_features <- paste0(
+selected_CARD_features <- paste0(
   "CARD_",
   make.names(
-    selected_card_cell_types
+    selected_CARD_cell_types
   )
 )
 
-available_card_features <- intersect(
-  selected_card_features,
+available_CARD_features <- intersect(
+  selected_CARD_features,
   colnames(spatial_object@meta.data)
 )
 
@@ -1846,7 +1841,7 @@ cat(
 )
 
 print(
-  available_card_features
+  available_CARD_features
 )
 
 
@@ -1875,7 +1870,7 @@ for (sample_name in sample_order) {
     showWarnings = FALSE
   )
 
-  for (feature_name in available_card_features) {
+  for (feature_name in available_CARD_features) {
     clean_feature_name <- gsub(
       "^CARD_",
       "",
@@ -1941,11 +1936,11 @@ cat(
 
 saveRDS(
   object = spatial_object,
-  file = final_card_object_file,
+  file = final_CARD_object_file,
   compress = TRUE
 )
 
-if (!file.exists(final_card_object_file)) {
+if (!file.exists(final_CARD_object_file)) {
   stop(
     "Final CARD-annotated spatial Seurat object was not saved successfully."
   )
@@ -1994,11 +1989,11 @@ CARD_parameters <- data.frame(
     spatial_assay,
     spatial_sample_column,
     minimum_shared_genes,
-    card_min_count_gene,
-    card_min_count_spot,
-    run_card_imputation,
-    card_num_grids,
-    card_num_neighbors
+    CARD_min_count_gene,
+    CARD_min_count_spot,
+    run_CARD_imputation,
+    CARD_num_grids,
+    CARD_num_neighbors
   ),
   stringsAsFactors = FALSE
 )
@@ -2011,25 +2006,13 @@ utils::write.csv(
 
 
 #------------------------------------------------------------------------------
-# 32. Save session information
-#------------------------------------------------------------------------------
-
-writeLines(
-  capture.output(
-    sessionInfo()
-  ),
-  con = session_info_file
-)
-
-
-#------------------------------------------------------------------------------
-# 33. Validate expected Module 14 outputs
+# 32. Validate expected Module 14 outputs
 #------------------------------------------------------------------------------
 
 expected_object_files <- c(
-  all_card_results_file,
-  all_card_identities_file,
-  final_card_object_file,
+  all_CARD_results_file,
+  all_CARD_identities_file,
+  final_CARD_object_file,
   vapply(
     CARD_results,
     function(x) x$object_file,
@@ -2046,7 +2029,6 @@ expected_result_files <- c(
   metadata_file,
   transfer_summary_file,
   parameter_file,
-  session_info_file,
   unlist(
     lapply(
       CARD_results,
@@ -2124,7 +2106,7 @@ cat(
 
 
 #------------------------------------------------------------------------------
-# 34. Final module summary
+# 33. Final module summary
 #------------------------------------------------------------------------------
 
 cat(
@@ -2141,15 +2123,15 @@ cat(
   "Reference genes:           ", nrow(reference_counts), "\n",
   "Reference cell types:      ", length(reference_cell_types), "\n",
   "Minimum shared genes:      ", minimum_shared_genes, "\n",
-  "CARD minCountGene:         ", card_min_count_gene, "\n",
-  "CARD minCountSpot:         ", card_min_count_spot, "\n",
-  "CARD metadata columns:     ", length(card_columns), "\n",
+  "CARD minCountGene:         ", CARD_min_count_gene, "\n",
+  "CARD minCountSpot:         ", CARD_min_count_spot, "\n",
+  "CARD metadata columns:     ", length(CARD_columns), "\n",
   "\n",
   "Primary downstream object:\n",
-  "  ", final_card_object_file, "\n",
+  "  ", final_CARD_object_file, "\n",
   "\n",
   "CARD objects:\n",
-  "  ", card_object_directory, "\n",
+  "  ", CARD_object_directory, "\n",
   "\n",
   "CARD result tables:\n",
   "  ", results_directory, "\n",

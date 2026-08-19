@@ -6,7 +6,7 @@ date: "2026-08-12"
 
 ```{r}
 #==============================================================================
-# MODULE 13 — Spatial CellChat communication analysis
+# MODULE 12 — Spatial CellChat communication analysis
 #==============================================================================
 
 # Purpose:
@@ -283,11 +283,6 @@ malignant_summary_file <- file.path(
 parameter_file <- file.path(
   results_directory,
   "spatial_CellChat_parameters.csv"
-)
-
-session_info_file <- file.path(
-  results_directory,
-  "spatial_CellChat_sessionInfo.txt"
 )
 
 
@@ -2722,19 +2717,7 @@ utils::write.csv(
 
 
 #------------------------------------------------------------------------------
-# 32. Save session information
-#------------------------------------------------------------------------------
-
-writeLines(
-  capture.output(
-    sessionInfo()
-  ),
-  con = session_info_file
-)
-
-
-#------------------------------------------------------------------------------
-# 33. Validate expected Module 13 outputs
+# 32. Validate expected Module 13 outputs
 #------------------------------------------------------------------------------
 
 expected_object_files <- c(
@@ -2760,7 +2743,6 @@ expected_result_files <- c(
   summary_file,
   malignant_summary_file,
   parameter_file,
-  session_info_file,
   all_interactions_file,
   all_malignant_file,
   all_malignant_outgoing_file,
@@ -2924,7 +2906,7 @@ cat(
 
 
 #------------------------------------------------------------------------------
-# 34. Final module summary
+# 33. Final module summary
 #------------------------------------------------------------------------------
 
 cat(

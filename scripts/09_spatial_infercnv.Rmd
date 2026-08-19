@@ -6,7 +6,7 @@ date: "2026-08-11"
 
 ```{r}
 #==============================================================================
-# MODULE 10 — Spatial inferCNV analysis
+# MODULE 09 — Spatial inferCNV analysis
 #==============================================================================
 
 # Purpose:
@@ -1464,24 +1464,7 @@ saveRDS(
 
 
 #------------------------------------------------------------------------------
-# 27. Save session information
-#------------------------------------------------------------------------------
-
-session_info_file <- file.path(
-  results_directory,
-  "spatial_infercnv_sessionInfo.txt"
-)
-
-writeLines(
-  capture.output(
-    sessionInfo()
-  ),
-  con = session_info_file
-)
-
-
-#------------------------------------------------------------------------------
-# 28. Validate expected Module 10 outputs
+# 27. Validate expected Module 10 outputs
 #------------------------------------------------------------------------------
 
 expected_object_files <- c(
@@ -1493,8 +1476,7 @@ expected_result_files <- c(
   gene_order_summary_file,
   input_group_summary_file,
   parameter_file,
-  analysis_manifest_file,
-  session_info_file
+  analysis_manifest_file
 )
 
 expected_infercnv_result_files <- vapply(
@@ -1597,7 +1579,7 @@ cat(
 
 
 #------------------------------------------------------------------------------
-# 29. Final module summary
+# 28. Final module summary
 #------------------------------------------------------------------------------
 
 cat(

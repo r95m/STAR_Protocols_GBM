@@ -180,4 +180,6 @@ renv/local/
 # Miscellaneous
 #------------------------------------------------------------------------------
 
+# Ignore local documentation
+/docs/
 Thumbs.db

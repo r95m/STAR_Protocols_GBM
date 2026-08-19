@@ -6,7 +6,7 @@ date: "2026-08-12"
 
 ```{r}
 #==============================================================================
-# MODULE 12 — Spatial SingleR annotation
+# MODULE 11 — Spatial SingleR annotation
 #==============================================================================
 
 # Purpose:
@@ -227,12 +227,6 @@ parameter_file <- file.path(
   results_directory,
   "spatial_singleR_parameters.csv"
 )
-
-session_info_file <- file.path(
-  results_directory,
-  "spatial_singleR_sessionInfo.txt"
-)
-
 
 cat(
   "\n============================================================\n",
@@ -1673,19 +1667,7 @@ utils::write.csv(
 
 
 #------------------------------------------------------------------------------
-# 36. Save session information
-#------------------------------------------------------------------------------
-
-writeLines(
-  capture.output(
-    sessionInfo()
-  ),
-  con = session_info_file
-)
-
-
-#------------------------------------------------------------------------------
-# 37. Validate expected Module 12 outputs
+# 36. Validate expected Module 12 outputs
 #------------------------------------------------------------------------------
 
 expected_object_files <- c(
@@ -1700,8 +1682,7 @@ expected_result_files <- c(
   malignancy_composition_file,
   singleR_count_file,
   singleR_palette_file,
-  parameter_file,
-  session_info_file
+  parameter_file
 )
 
 expected_figure_files <- c(
@@ -1772,7 +1753,7 @@ cat(
 
 
 #------------------------------------------------------------------------------
-# 38. Final module summary
+# 39. Final module summary
 #------------------------------------------------------------------------------
 
 uncertain_spots <- sum(

@@ -6,7 +6,7 @@ date: "2026-08-12"
 
 ```{r}
 #==============================================================================
-# MODULE 11 — Spatial inferCNV cancer-spot classification
+# MODULE 10 — Spatial inferCNV cancer-spot classification
 #==============================================================================
 
 # Purpose:
@@ -249,11 +249,6 @@ final_metadata_file <- file.path(
 parameter_file <- file.path(
   classification_results_directory,
   "spatial_infercnv_classification_parameters.csv"
-)
-
-session_info_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_classification_sessionInfo.txt"
 )
 
 cat(
@@ -2418,19 +2413,7 @@ utils::write.csv(
 
 
 #------------------------------------------------------------------------------
-# 39. Save session information
-#------------------------------------------------------------------------------
-
-writeLines(
-  capture.output(
-    sessionInfo()
-  ),
-  con = session_info_file
-)
-
-
-#------------------------------------------------------------------------------
-# 40. Validate expected Module 11 outputs
+# 39. Validate expected Module 11 outputs
 #------------------------------------------------------------------------------
 
 expected_object_files <- c(
@@ -2445,8 +2428,7 @@ expected_result_files <- c(
   transfer_summary_file,
   final_metadata_file,
   parameter_file,
-  chr_dosage_summary_file,
-  session_info_file
+  chr_dosage_summary_file
 )
 
 if (!is.null(combined_hmm_summary_file)) {
@@ -2543,7 +2525,7 @@ cat(
 
 
 #------------------------------------------------------------------------------
-# 41. Final module summary
+# 40. Final module summary
 #------------------------------------------------------------------------------
 
 malignant_spots <- sum(

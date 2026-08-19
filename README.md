@@ -4,7 +4,7 @@ This repository contains the analysis workflow accompanying a **STAR Protocols**
 
 The workflow was developed to support the computational analyses associated with the study of **PRKCD-associated biology and niacin treatment in glioblastoma**, with an emphasis on reproducibility, modular analysis, and transparent intermediate outputs.
 
-The repository is organized as **14 sequential R Markdown modules**. Individual modules generate checkpoint objects, result tables, and figures that can be inspected independently or used as inputs for subsequent analyses.
+The repository is organized as 14 numbered R Markdown modules comprising sequential and branching analysis workflows.. Individual modules generate checkpoint objects, result tables, and figures that can be inspected independently or used as inputs for subsequent analyses.
 
 ---
 
@@ -87,7 +87,7 @@ The analysis is divided into three major components:
 | 10     | Cancer-spot classification           | Module 09              | CNV-annotated spatial Seurat object   |
 | 11     | Spatial SingleR                      | Module 10              | Cell-type-annotated spatial object    |
 | 12     | Spatial CellChat                     | Module 11              | Spatial communication results         |
-| 13     | CARD deconvolution                   | Modules 04 and 11      | CARD-annotated spatial Seurat object  |
+| 13     | CARD deconvolution                   | Modules 04 and 11      | Module 04 scRNA-seq reference + Module 11 spatial object  |
 | 14     | TCGA-GBM validation                  | TCGA-GBM               | External validation results           |
 
 ---
@@ -104,7 +104,7 @@ STAR_Protocols_GBM/
 ├── .gitignore
 ├── renv.lock
 │
-├── code/
+├── scripts/
 │   ├── 01_seurat_assembly.Rmd
 │   ├── 02_seurat_qc_filtering.Rmd
 │   ├── 03_seurat_normalization_clustering_dea.Rmd
@@ -142,8 +142,7 @@ STAR_Protocols_GBM/
 │   ├── spatial/
 │   └── bulk/
 │
-└── environment/
-    └── sessionInfo.txt
+├── STAR_Protocols_GBM.Rproj
 ```
 
 Some directories are created automatically by individual analysis modules when required.
@@ -259,17 +258,16 @@ Then restore the project environment:
 renv::restore()
 ```
 
-A record of the validated R environment is also provided in:
-
-```text
-environment/sessionInfo.txt
+```r
+renv::status()
 ```
 
----
+Package restoration may take several minutes because the workflow includes packages from CRAN, Bioconductor, and GitHub. 
+Users should run renv::status() after restoration to confirm that the project library is synchronized with renv.lock.
 
 # Running the workflow
 
-Clone the repository and open the project in RStudio.
+Clone the repository and open STAR_Protocols_GBM.Rproj in RStudio. This ensures that the repository root is used as the working project directory.
 
 Because paths are constructed using `here::here()`, users should not need to modify machine-specific paths.
 

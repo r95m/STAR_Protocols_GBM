@@ -5,26 +5,6 @@
       {
         "Name": "CRAN",
         "URL": "https://cran.rstudio.com"
-      },
-      {
-        "Name": "BioCsoft",
-        "URL": "https://bioconductor.org/packages/3.23/bioc"
-      },
-      {
-        "Name": "BioCann",
-        "URL": "https://bioconductor.org/packages/3.23/data/annotation"
-      },
-      {
-        "Name": "BioCexp",
-        "URL": "https://bioconductor.org/packages/3.23/data/experiment"
-      },
-      {
-        "Name": "BioCworkflows",
-        "URL": "https://bioconductor.org/packages/3.23/workflows"
-      },
-      {
-        "Name": "BioCbooks",
-        "URL": "https://bioconductor.org/packages/3.23/books"
       }
     ]
   },
@@ -4474,6 +4454,68 @@
       "Author": "John Fox [aut], Sanford Weisberg [aut], Brad Price [aut, cre]",
       "Maintainer": "Brad Price <brad.price@mail.wvu.edu>",
       "Repository": "CRAN"
+    },
+    "card": {
+      "Package": "CARD",
+      "Version": "1.1",
+      "Source": "GitHub",
+      "Type": "Package",
+      "Title": "Spatially Informed Cell Type Deconvolution for Spatial Transcriptomics",
+      "Date": "2022-05-03",
+      "Author": "Ying Ma",
+      "Maintainer": "Ying Ma <yingma@umich.edu>",
+      "Description": "CARD is a reference-based deconvolution method that estimates cell type composition in spatial transcriptomics based on cell type specific expression information obtained from a reference scRNA-seq data. A key feature of CARD is its ability to accommodate spatial correlation in the cell type composition across tissue locations, enabling accurate and spatially informed cell type deconvolution as well as refined spatial map construction. CARD relies on an efficient optimization algorithm for constrained maximum likelihood estimation and is scalable to spatial transcriptomics with tens of thousands of spatial locations and tens of thousands of genes. CARD is implemented as an open-source R package, freely available at www.xzlab.org/software.html",
+      "License": "GPL (>= 3)",
+      "Encoding": "UTF-8",
+      "RoxygenNote": "7.2.3",
+      "Imports": [
+        "Rcpp (>= 1.0.7)",
+        "RcppArmadillo",
+        "SingleCellExperiment",
+        "SummarizedExperiment",
+        "methods",
+        "MCMCpack",
+        "fields",
+        "wrMisc",
+        "concaveman",
+        "sp",
+        "dplyr",
+        "sf",
+        "Matrix",
+        "RANN",
+        "ggplot2",
+        "reshape2",
+        "RColorBrewer",
+        "scatterpie",
+        "grDevices",
+        "ggcorrplot",
+        "stats",
+        "nnls",
+        "pbmcapply",
+        "RcppML",
+        "NMF",
+        "spatstat.random",
+        "gtools"
+      ],
+      "LinkingTo": [
+        "Rcpp",
+        "RcppArmadillo"
+      ],
+      "Suggests": [
+        "rmarkdown",
+        "knitr"
+      ],
+      "VignetteBuilder": "knitr",
+      "RemoteType": "github",
+      "RemoteHost": "api.github.com",
+      "RemoteRepo": "CARD",
+      "RemoteUsername": "YingMa0107",
+      "RemoteRef": "HEAD",
+      "RemoteSha": "2d64b91abb5cdd0c7f576b1c5d4727c84e7c93a0",
+      "NeedsCompilation": "yes",
+      "Depends": [
+        "R (>= 3.5.0)"
+      ]
     },
     "celldex": {
       "Package": "celldex",
@@ -11170,6 +11212,31 @@
       "Author": "Mike Smith [aut, ccp] (ORCID: <https://orcid.org/0000-0002-7800-3848>), Hugo Gruson [cre] (ORCID: <https://orcid.org/0000-0002-4094-1476>)",
       "Maintainer": "Hugo Gruson <hugo.gruson@embl.de>"
     },
+    "rjags": {
+      "Package": "rjags",
+      "Version": "5-1",
+      "Source": "Local",
+      "Date": "2026-02-26",
+      "Title": "Bayesian Graphical Models using MCMC",
+      "Authors@R": "c(person(\"Martyn\", \"Plummer\", role=c(\"aut\",\"cre\"), email=\"martyn.plummer@gmail.com\"), person(\"Alexey\", \"Stukalov\", role=\"ctb\"), person(\"Matt\", \"Denwood\", role=\"ctb\"))",
+      "Depends": [
+        "R (>= 2.14.0)",
+        "coda (>= 0.13)"
+      ],
+      "SystemRequirements": "JAGS (>= 5.0.0)",
+      "URL": "https://mcmc-jags.sourceforge.io",
+      "Suggests": [
+        "tcltk"
+      ],
+      "Description": "Interface to the JAGS MCMC library.",
+      "License": "GPL (== 2)",
+      "NeedsCompilation": "yes",
+      "Author": "Martyn Plummer [aut, cre], Alexey Stukalov [ctb], Matt Denwood [ctb]",
+      "Maintainer": "Martyn Plummer <martyn.plummer@gmail.com>",
+      "RemoteType": "local",
+      "RemotePkgRef": "local::/Users/rm403/Downloads/rjags",
+      "RemoteUrl": "/Users/rm403/Downloads/rjags"
+    },
     "rjson": {
       "Package": "rjson",
       "Version": "0.2.23",
@@ -12261,9 +12328,9 @@
     },
     "spatstat.geom": {
       "Package": "spatstat.geom",
-      "Version": "3.8-2",
+      "Version": "3.8-1",
       "Source": "Repository",
-      "Date": "2026-07-23",
+      "Date": "2026-05-23",
       "Title": "Geometrical Functionality of the 'spatstat' Family",
       "Authors@R": "c(person(\"Adrian\", \"Baddeley\",  role = c(\"aut\", \"cre\", \"cph\"), email = \"Adrian.Baddeley@curtin.edu.au\", comment = c(ORCID=\"0000-0001-9499-8382\")), person(\"Rolf\", \"Turner\",  role = c(\"aut\", \"cph\"), email=\"rolfturner@posteo.net\", comment=c(ORCID=\"0000-0001-5521-5218\")), person(\"Ege\",   \"Rubak\",  role = c(\"aut\", \"cph\"), email = \"rubak@math.aau.dk\", comment=c(ORCID=\"0000-0002-6675-533X\")), person(\"Warick\",    \"Brown\" ,        role = \"ctb\"), person(\"Tilman\",    \"Davies\",        role = \"ctb\"), person(\"Ute\",       \"Hahn\",          role = \"ctb\"), person(\"Martin\",    \"Hazelton\",      role = \"ctb\"), person(\"Abdollah\",  \"Jalilian\",      role = \"ctb\"), person(\"Greg\",      \"McSwiggan\",     role = c(\"ctb\", \"cph\")), person(\"Sebastian\", \"Meyer\",         role = c(\"ctb\", \"cph\")), person(\"Jens\",      \"Oehlschlaegel\", role = c(\"ctb\", \"cph\")), person(\"Suman\",     \"Rakshit\",       role = \"ctb\"), person(\"Dominic\",   \"Schuhmacher\",   role = \"ctb\"), person(\"Rasmus\",    \"Waagepetersen\", role = \"ctb\"))",
       "Maintainer": "Adrian Baddeley <Adrian.Baddeley@curtin.edu.au>",
@@ -12278,12 +12345,12 @@
         "methods"
       ],
       "Imports": [
-        "spatstat.utils (>= 3.2-4)",
-        "deldir (>= 2.0-2)",
+        "spatstat.utils (>= 3.2-3)",
+        "deldir (>= 1.0-2)",
         "polyclip (>= 1.10)"
       ],
       "Suggests": [
-        "spatstat.random (>= 3.5)",
+        "spatstat.random (>= 3.4-5)",
         "spatstat.explore (>= 3.8)",
         "spatstat.model (>= 3.7)",
         "spatstat.linnet (>= 3.5)",
@@ -12396,9 +12463,9 @@
     },
     "spatstat.utils": {
       "Package": "spatstat.utils",
-      "Version": "3.2-4",
+      "Version": "3.2-3",
       "Source": "Repository",
-      "Date": "2026-07-16",
+      "Date": "2026-05-10",
       "Title": "Utility Functions for 'spatstat'",
       "Authors@R": "c(person(\"Adrian\", \"Baddeley\",  role = c(\"aut\", \"cre\"), email = \"Adrian.Baddeley@curtin.edu.au\", comment = c(ORCID=\"0000-0001-9499-8382\")), person(\"Rolf\", \"Turner\",  role = \"aut\", email=\"rolfturner@posteo.net\", comment=c(ORCID=\"0000-0001-5521-5218\")), person(\"Ege\",   \"Rubak\",  role = \"aut\", email = \"rubak@math.aau.dk\", comment=c(ORCID=\"0000-0002-6675-533X\")))",
       "Maintainer": "Adrian Baddeley <Adrian.Baddeley@curtin.edu.au>",
