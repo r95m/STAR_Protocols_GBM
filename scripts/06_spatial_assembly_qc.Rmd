@@ -10,44 +10,17 @@ date: "2026-08-11"
 #==============================================================================
 
 # Purpose:
-#   Import four 10x Genomics Visium spatial transcriptomics datasets,
-#   construct sample-level Seurat objects, preserve tissue images and spatial
-#   coordinates, add consistent sample metadata, merge all slides, join
-#   Seurat v5 assay layers, calculate spot-level QC metrics, inspect spatial
-#   coverage and sequencing quality, apply validated QC thresholds, generate
-#   diagnostic figures and tables, and save the QC-filtered spatial Seurat
-#   object for downstream normalization, integration, and clustering.
+#   Load four 10x Genomics Visium datasets, preserve spatial images and
+#   coordinates, merge the slides, calculate spot-level QC metrics, inspect
+#   sequencing quality across tissue sections, apply QC thresholds, and save
+#   the filtered spatial Seurat object for downstream analysis.
 #
 # Input:
 #   data/raw/spatial_raw/
 #
-# Expected slide directories:
-#   Naive-A9/
-#   Niacin2-B5/
-#   Vehicle1-C5/
-#   Vehicle2-D5/
-#
-# Expected count files:
-#   Naive-A9/
-#     naive_A9_filtered_feature_bc_matrix.h5
-#
-#   Niacin2-B5/
-#     Niacin2_B5_filtered_feature_bc_matrix.h5
-#
-#   Vehicle1-C5/
-#     vehicle1_c5_filtered_feature_bc_matrix.h5
-#
-#   Vehicle2-D5/
-#     vehicle2_D5_filtered_feature_bc_matrix.h5
-#
-# Primary output object:
-#   data/processed/spatial/
-#     spatial_QC_filtered_seurat.rds
-#
-# Output tables:
+# Output:
+#   data/processed/spatial/spatial_QC_filtered_seurat.rds
 #   results/spatial/qc/
-#
-# Output figures:
 #   figures/spatial/qc/
 #
 # QC thresholds:
@@ -55,49 +28,36 @@ date: "2026-08-11"
 #   percent.mt <= 25
 #
 # Notes:
-#   - Mouse mitochondrial genes are identified using the "^mt-" pattern.
-#   - Raw spatial counts are retained for downstream inferCNV and CARD.
-#   - No SCTransform, PCA, Harmony, clustering, UMAP, or t-SNE is performed
-#     in this module.
-#   - Normalization and integration begin in Module 07.
-#==============================================================================
+#   Raw counts are retained. Normalization, dimensionality reduction,
+#   integration, and clustering are performed in Module 07.
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
   library(Seurat)
   library(SeuratObject)
+  library(hdf5r)
   library(dplyr)
   library(ggplot2)
   library(patchwork)
   library(here)
 })
 
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
-
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
+# Analysis parameters
 
 spatial_assay <- "Spatial"
 
 minimum_features <- 200
-
 maximum_percent_mt <- 25
 
 
-#------------------------------------------------------------------------------
-# 4. Define repository paths
-#------------------------------------------------------------------------------
+# Repository paths
 
 spatial_raw_directory <- here::here(
   "data",
@@ -123,13 +83,13 @@ figure_directory <- here::here(
   "qc"
 )
 
-directories_to_create <- c(
+
+for (directory in c(
   processed_directory,
   results_directory,
   figure_directory
-)
+)) {
 
-for (directory in directories_to_create) {
   dir.create(
     directory,
     recursive = TRUE,
@@ -137,407 +97,215 @@ for (directory in directories_to_create) {
   )
 }
 
+
 qc_filtered_file <- file.path(
   processed_directory,
   "spatial_QC_filtered_seurat.rds"
 )
 
-cat(
-  "\n============================================================\n",
-  "MODULE 06 — Spatial transcriptomics assembly and QC\n",
-  "============================================================\n",
-  "Repository root:    ", here::here(), "\n",
-  "Raw spatial data:   ", spatial_raw_directory, "\n",
-  "Processed data:     ", processed_directory, "\n",
-  "Results directory: ", results_directory, "\n",
-  "Figure directory:  ", figure_directory, "\n",
-  "============================================================\n\n",
-  sep = ""
-)
 
-
-#------------------------------------------------------------------------------
-# 5. Define spatial sample metadata
-#------------------------------------------------------------------------------
+# Sample metadata
 
 sample_info <- data.frame(
+
   sample = c(
     "Normal_Tissue",
     "Niacin_Treatment",
     "Vehicle_1",
     "Vehicle_2"
   ),
+
   condition = c(
     "Normal",
     "Niacin",
     "Vehicle",
     "Vehicle"
   ),
+
   slide_directory = c(
     "Naive-A9",
     "Niacin2-B5",
     "Vehicle1-C5",
     "Vehicle2-D5"
   ),
+
   count_file = c(
     "naive_A9_filtered_feature_bc_matrix.h5",
     "Niacin2_B5_filtered_feature_bc_matrix.h5",
     "vehicle1_c5_filtered_feature_bc_matrix.h5",
     "vehicle2_D5_filtered_feature_bc_matrix.h5"
   ),
+
   image_name = c(
     "Naive_A9",
     "Niacin2_B5",
     "Vehicle1_C5",
     "Vehicle2_D5"
   ),
+
   stringsAsFactors = FALSE
 )
 
-cat(
-  "Spatial samples included:\n"
-)
 
-print(
-  sample_info
-)
+print(sample_info)
 
 
 #------------------------------------------------------------------------------
-# 6. Validate raw spatial input directory
+# 2. Load spatial datasets
 #------------------------------------------------------------------------------
 
 if (!dir.exists(spatial_raw_directory)) {
   stop(
-    "Spatial raw-data directory was not found:\n",
+    "Spatial raw-data directory not found: ",
     spatial_raw_directory
   )
 }
 
-for (i in seq_len(nrow(sample_info))) {
+
+load_spatial_sample <- function(sample_row) {
+
   sample_directory <- file.path(
     spatial_raw_directory,
-    sample_info$slide_directory[i]
+    sample_row$slide_directory
   )
 
   count_file <- file.path(
     sample_directory,
-    sample_info$count_file[i]
+    sample_row$count_file
   )
 
-  spatial_directory <- file.path(
-    sample_directory,
-    "spatial"
-  )
 
   if (!dir.exists(sample_directory)) {
     stop(
-      "Spatial sample directory was not found:\n",
+      "Spatial sample directory not found: ",
       sample_directory
     )
   }
 
+
   if (!file.exists(count_file)) {
     stop(
-      "Filtered feature-barcode matrix was not found:\n",
+      "Spatial count matrix not found: ",
       count_file
     )
   }
 
-  if (!dir.exists(spatial_directory)) {
-    stop(
-      "10x spatial image/coordinate directory was not found:\n",
-      spatial_directory
-    )
-  }
-}
 
-cat(
-  "\nAll expected spatial input directories and count files were found.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 7. Function to load one Visium spatial dataset
-#------------------------------------------------------------------------------
-
-load_spatial_sample <- function(
-    sample_name,
-    condition,
-    slide_directory,
-    count_file,
-    image_name,
-    spatial_raw_directory,
-    spatial_assay
-) {
-
-  sample_directory <- file.path(
-    spatial_raw_directory,
-    slide_directory
+  message(
+    "Loading spatial sample: ",
+    sample_row$sample
   )
 
-  cat(
-    "\n------------------------------------------------------------\n",
-    "Loading spatial sample: ", sample_name, "\n",
-    "Condition:              ", condition, "\n",
-    "Slide directory:        ", slide_directory, "\n",
-    "------------------------------------------------------------\n",
-    sep = ""
-  )
 
   spatial_object <- Seurat::Load10X_Spatial(
     data.dir = sample_directory,
-    filename = count_file,
+    filename = sample_row$count_file,
     assay = spatial_assay,
-    slice = image_name,
+    slice = sample_row$image_name,
     filter.matrix = TRUE,
     image.name = "tissue_lowres_image.png"
   )
 
-  if (!inherits(spatial_object, "Seurat")) {
-    stop(
-      "Failed to create Seurat object for sample: ",
-      sample_name
-    )
-  }
 
-  spatial_object$sample <- sample_name
+  spatial_object$sample <- sample_row$sample
+  spatial_object$condition <- sample_row$condition
+  spatial_object$slide <- sample_row$image_name
 
-  spatial_object$condition <- condition
-
-  spatial_object$slide <- image_name
-
-  cat(
-    "Spatial sample loaded successfully:\n",
-    "  Features: ", nrow(spatial_object), "\n",
-    "  Spots:    ", ncol(spatial_object), "\n",
-    "  Images:   ",
-    paste(
-      Seurat::Images(spatial_object),
-      collapse = ", "
-    ),
-    "\n",
-    sep = ""
-  )
 
   return(spatial_object)
 }
 
 
-#------------------------------------------------------------------------------
-# 8. Load all four spatial datasets
-#------------------------------------------------------------------------------
+spatial_objects <- lapply(
+  seq_len(nrow(sample_info)),
+  function(i) {
 
-Naive_A9_seurat <- load_spatial_sample(
-  sample_name = "Normal_Tissue",
-  condition = "Normal",
-  slide_directory = "Naive-A9",
-  count_file = "naive_A9_filtered_feature_bc_matrix.h5",
-  image_name = "Naive_A9",
-  spatial_raw_directory = spatial_raw_directory,
-  spatial_assay = spatial_assay
-)
-
-Niacin2_B5_seurat <- load_spatial_sample(
-  sample_name = "Niacin_Treatment",
-  condition = "Niacin",
-  slide_directory = "Niacin2-B5",
-  count_file = "Niacin2_B5_filtered_feature_bc_matrix.h5",
-  image_name = "Niacin2_B5",
-  spatial_raw_directory = spatial_raw_directory,
-  spatial_assay = spatial_assay
-)
-
-Vehicle1_C5_seurat <- load_spatial_sample(
-  sample_name = "Vehicle_1",
-  condition = "Vehicle",
-  slide_directory = "Vehicle1-C5",
-  count_file = "vehicle1_c5_filtered_feature_bc_matrix.h5",
-  image_name = "Vehicle1_C5",
-  spatial_raw_directory = spatial_raw_directory,
-  spatial_assay = spatial_assay
-)
-
-Vehicle2_D5_seurat <- load_spatial_sample(
-  sample_name = "Vehicle_2",
-  condition = "Vehicle",
-  slide_directory = "Vehicle2-D5",
-  count_file = "vehicle2_D5_filtered_feature_bc_matrix.h5",
-  image_name = "Vehicle2_D5",
-  spatial_raw_directory = spatial_raw_directory,
-  spatial_assay = spatial_assay
+    load_spatial_sample(
+      sample_info[i, ]
+    )
+  }
 )
 
 
-#------------------------------------------------------------------------------
-# 9. Collect and validate individual spatial Seurat objects
-#------------------------------------------------------------------------------
-
-spatial_objects <- list(
-  Normal_Tissue = Naive_A9_seurat,
-  Niacin_Treatment = Niacin2_B5_seurat,
-  Vehicle_1 = Vehicle1_C5_seurat,
-  Vehicle_2 = Vehicle2_D5_seurat
-)
-
-for (sample_name in names(spatial_objects)) {
-  spatial_object <- spatial_objects[[sample_name]]
-
-  if (!inherits(spatial_object, "Seurat")) {
-    stop(
-      sample_name,
-      " is not a valid Seurat object."
-    )
-  }
-
-  if (!spatial_assay %in% Seurat::Assays(spatial_object)) {
-    stop(
-      "Spatial assay was not found in sample: ",
-      sample_name
-    )
-  }
-
-  if (ncol(spatial_object) == 0) {
-    stop(
-      sample_name,
-      " contains zero spatial spots."
-    )
-  }
-
-  if (nrow(spatial_object) == 0) {
-    stop(
-      sample_name,
-      " contains zero features."
-    )
-  }
-
-  if (length(Seurat::Images(spatial_object)) == 0) {
-    stop(
-      "No spatial image was retained for sample: ",
-      sample_name
-    )
-  }
-
-  if (anyDuplicated(colnames(spatial_object)) > 0) {
-    stop(
-      "Duplicated spot barcodes detected within sample: ",
-      sample_name
-    )
-  }
-}
-
-cat(
-  "\nIndividual spatial object validation completed successfully.\n"
-)
+names(spatial_objects) <- sample_info$sample
 
 
-#------------------------------------------------------------------------------
-# 10. Create and save individual-object summary
-#------------------------------------------------------------------------------
+# Summarize loaded datasets.
 
 individual_object_summary <- data.frame(
+
   sample = names(spatial_objects),
+
   condition = vapply(
     spatial_objects,
     function(x) unique(as.character(x$condition))[1],
     character(1)
   ),
+
   features = vapply(
     spatial_objects,
     nrow,
     numeric(1)
   ),
+
   spots = vapply(
     spatial_objects,
     ncol,
     numeric(1)
   ),
+
   image = vapply(
     spatial_objects,
     function(x) paste(Seurat::Images(x), collapse = ";"),
     character(1)
-  ),
-  stringsAsFactors = FALSE
+  )
 )
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Individual spatial object summary\n",
-  "------------------------------------------------------------\n"
-)
 
-print(
-  individual_object_summary
-)
+print(individual_object_summary)
 
-individual_object_summary_file <- file.path(
-  results_directory,
-  "spatial_individual_object_summary.csv"
-)
 
-utils::write.csv(
+write.csv(
   individual_object_summary,
-  individual_object_summary_file,
+  file.path(
+    results_directory,
+    "spatial_individual_object_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 11. Plot raw tissue sections
+# 3. Inspect tissue sections and merge slides
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Plotting raw spatial tissue sections\n",
-  "------------------------------------------------------------\n"
+# Visualize the spatial coverage of each tissue section before merging.
+
+tissue_plots <- lapply(
+  seq_along(spatial_objects),
+  function(i) {
+
+    Seurat::SpatialDimPlot(
+      spatial_objects[[i]]
+    ) +
+      ggplot2::labs(
+        title = sample_info$sample[i]
+      )
+  }
 )
 
-normal_tissue_plot <- Seurat::SpatialDimPlot(
-  Naive_A9_seurat
-) +
-  ggplot2::labs(
-    title = "Normal tissue"
-  )
 
-niacin_tissue_plot <- Seurat::SpatialDimPlot(
-  Niacin2_B5_seurat
-) +
-  ggplot2::labs(
-    title = "Niacin treatment"
-  )
-
-vehicle1_tissue_plot <- Seurat::SpatialDimPlot(
-  Vehicle1_C5_seurat
-) +
-  ggplot2::labs(
-    title = "Vehicle 1"
-  )
-
-vehicle2_tissue_plot <- Seurat::SpatialDimPlot(
-  Vehicle2_D5_seurat
-) +
-  ggplot2::labs(
-    title = "Vehicle 2"
-  )
-
-raw_tissue_plot <- (
-  normal_tissue_plot |
-  niacin_tissue_plot |
-  vehicle1_tissue_plot |
-  vehicle2_tissue_plot
+raw_tissue_plot <- patchwork::wrap_plots(
+  tissue_plots,
+  nrow = 1
 )
 
-print(
-  raw_tissue_plot
-)
-
-raw_tissue_plot_file <- file.path(
-  figure_directory,
-  "spatial_raw_tissue_sections.png"
-)
 
 ggplot2::ggsave(
-  filename = raw_tissue_plot_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_raw_tissue_sections.png"
+  ),
   plot = raw_tissue_plot,
   width = 18,
   height = 5,
@@ -545,23 +313,11 @@ ggplot2::ggsave(
 )
 
 
-#------------------------------------------------------------------------------
-# 12. Merge spatial Seurat objects
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Merging spatial Seurat objects\n",
-  "------------------------------------------------------------\n"
-)
+# Merge all four slides.
 
 spatial_merge <- merge(
-  x = Naive_A9_seurat,
-  y = list(
-    Niacin2_B5_seurat,
-    Vehicle1_C5_seurat,
-    Vehicle2_D5_seurat
-  ),
+  x = spatial_objects[[1]],
+  y = spatial_objects[-1],
   add.cell.ids = c(
     "normal",
     "niacin",
@@ -571,142 +327,46 @@ spatial_merge <- merge(
   project = "GBM_spatial"
 )
 
+
 Seurat::DefaultAssay(
   spatial_merge
 ) <- spatial_assay
 
-cat(
-  "Spatial objects merged successfully:\n",
-  "  Features: ", nrow(spatial_merge), "\n",
-  "  Spots:    ", ncol(spatial_merge), "\n",
-  "  Samples:  ",
-  length(unique(spatial_merge$sample)),
-  "\n",
-  sep = ""
+
+message(
+  "Merged spatial object: ",
+  nrow(spatial_merge),
+  " features and ",
+  ncol(spatial_merge),
+  " spots."
 )
 
-cat(
-  "\nSpots per sample:\n"
-)
 
 print(
   table(spatial_merge$sample)
 )
 
-cat(
-  "\nImages retained after merge:\n"
-)
 
-print(
-  Seurat::Images(spatial_merge)
-)
+# Join Seurat v5 assay layers after merging.
 
+if (
+  length(
+    SeuratObject::Layers(
+      spatial_merge[[spatial_assay]]
+    )
+  ) > 1
+) {
 
-#------------------------------------------------------------------------------
-# 13. Validate merged spatial images and sample identities
-#------------------------------------------------------------------------------
-
-expected_samples <- c(
-  "Normal_Tissue",
-  "Niacin_Treatment",
-  "Vehicle_1",
-  "Vehicle_2"
-)
-
-observed_samples <- sort(
-  unique(as.character(spatial_merge$sample))
-)
-
-if (!identical(
-  sort(expected_samples),
-  observed_samples
-)) {
-  stop(
-    "Merged object does not contain all expected samples.\n",
-    "Observed: ",
-    paste(observed_samples, collapse = ", ")
-  )
-}
-
-expected_images <- c(
-  "Naive_A9",
-  "Niacin2_B5",
-  "Vehicle1_C5",
-  "Vehicle2_D5"
-)
-
-observed_images <- Seurat::Images(
-  spatial_merge
-)
-
-missing_images <- setdiff(
-  expected_images,
-  observed_images
-)
-
-if (length(missing_images) > 0) {
-  stop(
-    "One or more expected spatial images were lost during merging:\n",
-    paste(missing_images, collapse = ", ")
-  )
-}
-
-cat(
-  "Merged sample identities and spatial images validated successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 14. Join Seurat v5 Spatial assay layers
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Joining Seurat v5 Spatial assay layers\n",
-  "------------------------------------------------------------\n"
-)
-
-layers_before_joining <- SeuratObject::Layers(
-  spatial_merge[[spatial_assay]]
-)
-
-cat(
-  "Spatial assay layers before joining:\n"
-)
-
-print(
-  layers_before_joining
-)
-
-if (length(layers_before_joining) > 1) {
   spatial_merge <- SeuratObject::JoinLayers(
     spatial_merge,
     assay = spatial_assay
   )
 }
 
-layers_after_joining <- SeuratObject::Layers(
-  spatial_merge[[spatial_assay]]
-)
-
-cat(
-  "\nSpatial assay layers after joining:\n"
-)
-
-print(
-  layers_after_joining
-)
-
 
 #------------------------------------------------------------------------------
-# 15. Calculate mitochondrial percentage
+# 4. Calculate spatial QC metrics
 #------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Calculating mitochondrial transcript percentage\n",
-  "------------------------------------------------------------\n"
-)
 
 spatial_merge[["percent.mt"]] <- Seurat::PercentageFeatureSet(
   spatial_merge,
@@ -714,38 +374,22 @@ spatial_merge[["percent.mt"]] <- Seurat::PercentageFeatureSet(
   pattern = "^mt-"
 )
 
+
 mitochondrial_genes <- grep(
-  pattern = "^mt-",
-  x = rownames(spatial_merge),
+  "^mt-",
+  rownames(spatial_merge),
   value = TRUE
 )
 
-cat(
-  "Mitochondrial genes detected: ",
-  length(mitochondrial_genes),
-  "\n",
-  sep = ""
-)
 
 if (length(mitochondrial_genes) == 0) {
+
   warning(
     "No mitochondrial genes matched '^mt-'. ",
     "Confirm the mouse gene-symbol naming convention."
   )
 }
 
-cat(
-  "\nMitochondrial percentage summary:\n"
-)
-
-print(
-  summary(spatial_merge$percent.mt)
-)
-
-
-#------------------------------------------------------------------------------
-# 16. Validate required QC metadata
-#------------------------------------------------------------------------------
 
 required_metadata <- c(
   "sample",
@@ -756,34 +400,26 @@ required_metadata <- c(
   "percent.mt"
 )
 
+
 missing_metadata <- setdiff(
   required_metadata,
   colnames(spatial_merge@meta.data)
 )
 
+
 if (length(missing_metadata) > 0) {
+
   stop(
-    "Required spatial QC metadata column(s) missing:\n",
-    paste(missing_metadata, collapse = ", ")
+    "Required spatial QC metadata missing: ",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
   )
 }
 
-if (anyDuplicated(colnames(spatial_merge)) > 0) {
-  stop(
-    "Duplicated spatial spot barcodes detected after merging."
-  )
-}
 
-
-#------------------------------------------------------------------------------
-# 17. Summarize QC before filtering
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "QC summary before filtering\n",
-  "------------------------------------------------------------\n"
-)
+# Summarize QC before filtering.
 
 spatial_qc_summary_before <- spatial_merge@meta.data %>%
   dplyr::group_by(
@@ -791,163 +427,91 @@ spatial_qc_summary_before <- spatial_merge@meta.data %>%
     condition
   ) %>%
   dplyr::summarise(
+
     total_spots = dplyr::n(),
+
     median_counts = median(
       nCount_Spatial,
       na.rm = TRUE
     ),
+
     median_features = median(
       nFeature_Spatial,
       na.rm = TRUE
     ),
+
     median_percent_mt = median(
       percent.mt,
       na.rm = TRUE
     ),
-    mean_counts = mean(
-      nCount_Spatial,
-      na.rm = TRUE
-    ),
-    mean_features = mean(
-      nFeature_Spatial,
-      na.rm = TRUE
-    ),
-    mean_percent_mt = mean(
-      percent.mt,
-      na.rm = TRUE
-    ),
+
     .groups = "drop"
   )
 
-print(
-  spatial_qc_summary_before
-)
 
-qc_summary_before_file <- file.path(
-  results_directory,
-  "spatial_QC_summary_before_filtering.csv"
-)
+print(spatial_qc_summary_before)
 
-utils::write.csv(
+
+write.csv(
   spatial_qc_summary_before,
-  qc_summary_before_file,
+  file.path(
+    results_directory,
+    "spatial_QC_summary_before_filtering.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 18. Examine candidate QC thresholds
+# 5. Assess spatial QC
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Evaluating candidate spatial QC thresholds\n",
-  "------------------------------------------------------------\n"
-)
+# Examine candidate thresholds before applying the final QC criteria.
 
 spatial_qc_thresholds <- spatial_merge@meta.data %>%
   dplyr::group_by(
     sample
   ) %>%
   dplyr::summarise(
+
     total_spots = dplyr::n(),
-    features_below_200 = sum(
-      nFeature_Spatial < 200,
-      na.rm = TRUE
-    ),
-    features_below_300 = sum(
-      nFeature_Spatial < 300,
-      na.rm = TRUE
-    ),
-    mt_above_10 = sum(
-      percent.mt > 10,
-      na.rm = TRUE
-    ),
-    mt_above_15 = sum(
-      percent.mt > 15,
-      na.rm = TRUE
-    ),
-    mt_above_20 = sum(
-      percent.mt > 20,
-      na.rm = TRUE
-    ),
-    mt_above_25 = sum(
-      percent.mt > 25,
-      na.rm = TRUE
-    ),
-    .groups = "drop"
-  )
 
-print(
-  spatial_qc_thresholds
-)
-
-qc_threshold_file <- file.path(
-  results_directory,
-  "spatial_QC_threshold_summary.csv"
-)
-
-utils::write.csv(
-  spatial_qc_thresholds,
-  qc_threshold_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 19. Calculate candidate threshold percentages
-#------------------------------------------------------------------------------
-
-spatial_qc_threshold_percentages <- spatial_merge@meta.data %>%
-  dplyr::group_by(
-    sample
-  ) %>%
-  dplyr::summarise(
-    total_spots = dplyr::n(),
     percent_below_200_features =
       mean(nFeature_Spatial < 200, na.rm = TRUE) * 100,
+
     percent_below_300_features =
       mean(nFeature_Spatial < 300, na.rm = TRUE) * 100,
+
     percent_mt_above_10 =
       mean(percent.mt > 10, na.rm = TRUE) * 100,
+
     percent_mt_above_15 =
       mean(percent.mt > 15, na.rm = TRUE) * 100,
+
     percent_mt_above_20 =
       mean(percent.mt > 20, na.rm = TRUE) * 100,
+
     percent_mt_above_25 =
       mean(percent.mt > 25, na.rm = TRUE) * 100,
+
     .groups = "drop"
   )
 
-cat(
-  "\nCandidate QC threshold percentages:\n"
-)
 
-print(
-  spatial_qc_threshold_percentages
-)
+print(spatial_qc_thresholds)
 
-qc_threshold_percentage_file <- file.path(
-  results_directory,
-  "spatial_QC_threshold_percentages.csv"
-)
 
-utils::write.csv(
-  spatial_qc_threshold_percentages,
-  qc_threshold_percentage_file,
+write.csv(
+  spatial_qc_thresholds,
+  file.path(
+    results_directory,
+    "spatial_QC_threshold_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 20. Generate QC violin plots before filtering
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating QC violin plots\n",
-  "------------------------------------------------------------\n"
-)
+# QC distributions across samples.
 
 qc_violin_plot <- Seurat::VlnPlot(
   spatial_merge,
@@ -961,17 +525,12 @@ qc_violin_plot <- Seurat::VlnPlot(
   pt.size = 0.1
 )
 
-print(
-  qc_violin_plot
-)
-
-qc_violin_file <- file.path(
-  figure_directory,
-  "spatial_QC_violin_plots_before_filtering.png"
-)
 
 ggplot2::ggsave(
-  filename = qc_violin_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_QC_violin_plots_before_filtering.png"
+  ),
   plot = qc_violin_plot,
   width = 15,
   height = 5,
@@ -979,236 +538,71 @@ ggplot2::ggsave(
 )
 
 
-#------------------------------------------------------------------------------
-# 21. Generate spatial sequencing-depth QC plots
-#------------------------------------------------------------------------------
+# Plot each QC metric across the tissue sections.
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Plotting spatial sequencing depth\n",
-  "------------------------------------------------------------\n"
-)
+plot_spatial_qc_metric <- function(
+    feature,
+    filename
+) {
 
-normal_count_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nCount_Spatial",
-  images = "Naive_A9"
-) +
-  ggplot2::labs(
-    title = "Normal tissue"
+  plots <- lapply(
+    seq_len(nrow(sample_info)),
+    function(i) {
+
+      Seurat::SpatialFeaturePlot(
+        spatial_merge,
+        features = feature,
+        images = sample_info$image_name[i]
+      ) +
+        ggplot2::labs(
+          title = sample_info$sample[i]
+        )
+    }
   )
 
-niacin_count_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nCount_Spatial",
-  images = "Niacin2_B5"
-) +
-  ggplot2::labs(
-    title = "Niacin treatment"
+
+  combined_plot <- patchwork::wrap_plots(
+    plots,
+    nrow = 1
   )
 
-vehicle1_count_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nCount_Spatial",
-  images = "Vehicle1_C5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 1"
+
+  ggplot2::ggsave(
+    filename = file.path(
+      figure_directory,
+      filename
+    ),
+    plot = combined_plot,
+    width = 18,
+    height = 5,
+    dpi = 600
   )
+}
 
-vehicle2_count_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nCount_Spatial",
-  images = "Vehicle2_D5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 2"
-  )
 
-spatial_count_plot <- (
-  normal_count_plot |
-  niacin_count_plot |
-  vehicle1_count_plot |
-  vehicle2_count_plot
+plot_spatial_qc_metric(
+  feature = "nCount_Spatial",
+  filename = "spatial_nCount_QC.png"
 )
 
-print(
-  spatial_count_plot
+
+plot_spatial_qc_metric(
+  feature = "nFeature_Spatial",
+  filename = "spatial_nFeature_QC.png"
 )
 
-spatial_count_plot_file <- file.path(
-  figure_directory,
-  "spatial_nCount_QC.png"
-)
 
-ggplot2::ggsave(
-  filename = spatial_count_plot_file,
-  plot = spatial_count_plot,
-  width = 18,
-  height = 5,
-  dpi = 600
+plot_spatial_qc_metric(
+  feature = "percent.mt",
+  filename = "spatial_percent_mt_QC.png"
 )
 
 
 #------------------------------------------------------------------------------
-# 22. Generate spatial feature-count QC plots
+# 6. Apply spatial QC filters
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Plotting spatial detected-feature counts\n",
-  "------------------------------------------------------------\n"
-)
-
-normal_feature_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nFeature_Spatial",
-  images = "Naive_A9"
-) +
-  ggplot2::labs(
-    title = "Normal tissue"
-  )
-
-niacin_feature_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nFeature_Spatial",
-  images = "Niacin2_B5"
-) +
-  ggplot2::labs(
-    title = "Niacin treatment"
-  )
-
-vehicle1_feature_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nFeature_Spatial",
-  images = "Vehicle1_C5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 1"
-  )
-
-vehicle2_feature_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "nFeature_Spatial",
-  images = "Vehicle2_D5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 2"
-  )
-
-spatial_feature_plot <- (
-  normal_feature_plot |
-  niacin_feature_plot |
-  vehicle1_feature_plot |
-  vehicle2_feature_plot
-)
-
-print(
-  spatial_feature_plot
-)
-
-spatial_feature_plot_file <- file.path(
-  figure_directory,
-  "spatial_nFeature_QC.png"
-)
-
-ggplot2::ggsave(
-  filename = spatial_feature_plot_file,
-  plot = spatial_feature_plot,
-  width = 18,
-  height = 5,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 23. Generate spatial mitochondrial QC plots
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Plotting spatial mitochondrial percentage\n",
-  "------------------------------------------------------------\n"
-)
-
-normal_mt_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "percent.mt",
-  images = "Naive_A9"
-) +
-  ggplot2::labs(
-    title = "Normal tissue"
-  )
-
-niacin_mt_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "percent.mt",
-  images = "Niacin2_B5"
-) +
-  ggplot2::labs(
-    title = "Niacin treatment"
-  )
-
-vehicle1_mt_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "percent.mt",
-  images = "Vehicle1_C5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 1"
-  )
-
-vehicle2_mt_plot <- Seurat::SpatialFeaturePlot(
-  spatial_merge,
-  features = "percent.mt",
-  images = "Vehicle2_D5"
-) +
-  ggplot2::labs(
-    title = "Vehicle 2"
-  )
-
-spatial_mt_plot <- (
-  normal_mt_plot |
-  niacin_mt_plot |
-  vehicle1_mt_plot |
-  vehicle2_mt_plot
-)
-
-print(
-  spatial_mt_plot
-)
-
-spatial_mt_plot_file <- file.path(
-  figure_directory,
-  "spatial_percent_mt_QC.png"
-)
-
-ggplot2::ggsave(
-  filename = spatial_mt_plot_file,
-  plot = spatial_mt_plot,
-  width = 18,
-  height = 5,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 24. Define selected QC thresholds
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Selected spatial QC thresholds\n",
-  "------------------------------------------------------------\n",
-  "Minimum detected features:  ", minimum_features, "\n",
-  "Maximum mitochondrial RNA: ", maximum_percent_mt, "%\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 25. Estimate spot retention before filtering
-#------------------------------------------------------------------------------
+# Estimate retention before filtering.
 
 spatial_retention_expected <- spatial_merge@meta.data %>%
   dplyr::group_by(
@@ -1216,55 +610,34 @@ spatial_retention_expected <- spatial_merge@meta.data %>%
     condition
   ) %>%
   dplyr::summarise(
+
     spots_before = dplyr::n(),
+
     spots_retained = sum(
       nFeature_Spatial >= minimum_features &
-      percent.mt <= maximum_percent_mt,
+        percent.mt <= maximum_percent_mt,
       na.rm = TRUE
     ),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+
     spots_removed =
       spots_before -
       spots_retained,
+
     percent_retained =
       100 *
       spots_retained /
-      spots_before,
-    .groups = "drop"
+      spots_before
   )
 
-cat(
-  "\nExpected spot retention using selected thresholds:\n"
-)
 
-print(
-  spatial_retention_expected
-)
-
-retention_expected_file <- file.path(
-  results_directory,
-  "spatial_QC_expected_retention.csv"
-)
-
-utils::write.csv(
-  spatial_retention_expected,
-  retention_expected_file,
-  row.names = FALSE
-)
+print(spatial_retention_expected)
 
 
-#------------------------------------------------------------------------------
-# 26. Apply spatial QC filters
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Applying spatial QC filters\n",
-  "------------------------------------------------------------\n"
-)
-
-spots_before_filtering <- ncol(
-  spatial_merge
-)
+# Apply selected thresholds.
 
 spatial_qc <- subset(
   spatial_merge,
@@ -1273,43 +646,43 @@ spatial_qc <- subset(
     percent.mt <= maximum_percent_mt
 )
 
-spots_after_filtering <- ncol(
-  spatial_qc
-)
 
-spots_removed <- spots_before_filtering -
-  spots_after_filtering
-
-if (spots_after_filtering == 0) {
+if (ncol(spatial_qc) == 0) {
   stop(
     "Spatial QC filtering removed all spots."
   )
 }
 
-cat(
-  "Spots before filtering: ",
-  spots_before_filtering,
-  "\n",
-  "Spots after filtering:  ",
-  spots_after_filtering,
-  "\n",
-  "Spots removed:          ",
-  spots_removed,
-  "\n",
-  "Overall retention:      ",
-  round(
-    100 *
-    spots_after_filtering /
-    spots_before_filtering,
-    2
-  ),
-  "%\n",
-  sep = ""
+
+# Confirm that every sample remains represented.
+
+samples_after_qc <- unique(
+  as.character(
+    spatial_qc$sample
+  )
 )
 
 
+missing_samples <- setdiff(
+  sample_info$sample,
+  samples_after_qc
+)
+
+
+if (length(missing_samples) > 0) {
+
+  stop(
+    "Sample(s) lost during QC filtering: ",
+    paste(
+      missing_samples,
+      collapse = ", "
+    )
+  )
+}
+
+
 #------------------------------------------------------------------------------
-# 27. Summarize QC after filtering
+# 7. Summarize post-QC dataset
 #------------------------------------------------------------------------------
 
 spatial_qc_summary_after <- spatial_qc@meta.data %>%
@@ -1318,59 +691,39 @@ spatial_qc_summary_after <- spatial_qc@meta.data %>%
     condition
   ) %>%
   dplyr::summarise(
+
     total_spots = dplyr::n(),
+
     median_counts = median(
       nCount_Spatial,
       na.rm = TRUE
     ),
+
     median_features = median(
       nFeature_Spatial,
       na.rm = TRUE
     ),
+
     median_percent_mt = median(
       percent.mt,
       na.rm = TRUE
     ),
-    mean_counts = mean(
-      nCount_Spatial,
-      na.rm = TRUE
-    ),
-    mean_features = mean(
-      nFeature_Spatial,
-      na.rm = TRUE
-    ),
-    mean_percent_mt = mean(
-      percent.mt,
-      na.rm = TRUE
-    ),
+
     .groups = "drop"
   )
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "QC summary after filtering\n",
-  "------------------------------------------------------------\n"
-)
 
-print(
-  spatial_qc_summary_after
-)
-
-qc_summary_after_file <- file.path(
-  results_directory,
-  "spatial_QC_summary_after_filtering.csv"
-)
-
-utils::write.csv(
+write.csv(
   spatial_qc_summary_after,
-  qc_summary_after_file,
+  file.path(
+    results_directory,
+    "spatial_QC_summary_after_filtering.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 28. Create final filtering summary
-#------------------------------------------------------------------------------
+# Final spot-retention table.
 
 spots_before_by_sample <- spatial_merge@meta.data %>%
   dplyr::count(
@@ -1379,12 +732,14 @@ spots_before_by_sample <- spatial_merge@meta.data %>%
     name = "spots_before"
   )
 
+
 spots_after_by_sample <- spatial_qc@meta.data %>%
   dplyr::count(
     sample,
     condition,
     name = "spots_after"
   )
+
 
 filtering_summary <- spots_before_by_sample %>%
   dplyr::left_join(
@@ -1395,43 +750,37 @@ filtering_summary <- spots_before_by_sample %>%
     )
   ) %>%
   dplyr::mutate(
-    spots_after = ifelse(
-      is.na(spots_after),
-      0,
-      spots_after
+
+    spots_after = tidyr::replace_na(
+      spots_after,
+      0
     ),
+
     spots_removed =
       spots_before -
       spots_after,
+
     percent_retained =
       100 *
       spots_after /
       spots_before
   )
 
-cat(
-  "\nFinal spot filtering summary:\n"
-)
 
-print(
-  filtering_summary
-)
+print(filtering_summary)
 
-filtering_summary_file <- file.path(
-  results_directory,
-  "spatial_QC_filtering_summary.csv"
-)
 
-utils::write.csv(
+write.csv(
   filtering_summary,
-  filtering_summary_file,
+  file.path(
+    results_directory,
+    "spatial_QC_filtering_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 29. Generate QC violin plots after filtering
-#------------------------------------------------------------------------------
+# QC distributions after filtering.
 
 qc_violin_after_plot <- Seurat::VlnPlot(
   spatial_qc,
@@ -1445,17 +794,12 @@ qc_violin_after_plot <- Seurat::VlnPlot(
   pt.size = 0.1
 )
 
-print(
-  qc_violin_after_plot
-)
-
-qc_violin_after_file <- file.path(
-  figure_directory,
-  "spatial_QC_violin_plots_after_filtering.png"
-)
 
 ggplot2::ggsave(
-  filename = qc_violin_after_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_QC_violin_plots_after_filtering.png"
+  ),
   plot = qc_violin_after_plot,
   width = 15,
   height = 5,
@@ -1464,212 +808,27 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 30. Validate QC-filtered spatial object
+# 8. Save QC-filtered spatial object
 #------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Validating QC-filtered spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
-
-if (!inherits(spatial_qc, "Seurat")) {
-  stop(
-    "QC-filtered spatial object is not a valid Seurat object."
-  )
-}
-
-if (!spatial_assay %in% Seurat::Assays(spatial_qc)) {
-  stop(
-    "Spatial assay was not retained after QC filtering."
-  )
-}
-
-if (any(
-  spatial_qc$nFeature_Spatial <
-  minimum_features
-)) {
-  stop(
-    "QC-filtered object contains spots below the feature threshold."
-  )
-}
-
-if (any(
-  spatial_qc$percent.mt >
-  maximum_percent_mt
-)) {
-  stop(
-    "QC-filtered object contains spots above the mitochondrial threshold."
-  )
-}
-
-observed_samples_after_qc <- sort(
-  unique(as.character(spatial_qc$sample))
-)
-
-if (!identical(
-  sort(expected_samples),
-  observed_samples_after_qc
-)) {
-  stop(
-    "One or more samples were lost during spatial QC filtering.\n",
-    "Observed samples: ",
-    paste(
-      observed_samples_after_qc,
-      collapse = ", "
-    )
-  )
-}
-
-images_after_qc <- Seurat::Images(
-  spatial_qc
-)
-
-missing_images_after_qc <- setdiff(
-  expected_images,
-  images_after_qc
-)
-
-if (length(missing_images_after_qc) > 0) {
-  stop(
-    "One or more spatial images were lost after QC filtering:\n",
-    paste(
-      missing_images_after_qc,
-      collapse = ", "
-    )
-  )
-}
-
-if (anyDuplicated(colnames(spatial_qc)) > 0) {
-  stop(
-    "Duplicated spatial spot barcodes detected after QC filtering."
-  )
-}
-
-cat(
-  "QC-filtered spatial object validation completed successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 31. Save QC-filtered spatial Seurat object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Saving QC-filtered spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
 
 saveRDS(
-  object = spatial_qc,
-  file = qc_filtered_file,
+  spatial_qc,
+  qc_filtered_file,
   compress = TRUE
 )
 
-if (!file.exists(qc_filtered_file)) {
-  stop(
-    "QC-filtered spatial Seurat object was not saved successfully:\n",
-    qc_filtered_file
-  )
-}
 
-cat(
-  "QC-filtered spatial object saved successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 32. Validate expected Module 06 outputs
-#------------------------------------------------------------------------------
-
-expected_result_files <- c(
-  individual_object_summary_file,
-  qc_summary_before_file,
-  qc_threshold_file,
-  qc_threshold_percentage_file,
-  retention_expected_file,
-  qc_summary_after_file,
-  filtering_summary_file
-)
-
-expected_figure_files <- c(
-  raw_tissue_plot_file,
-  qc_violin_file,
-  spatial_count_plot_file,
-  spatial_feature_plot_file,
-  spatial_mt_plot_file,
-  qc_violin_after_file
-)
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 06 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 06 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 06 outputs were created successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 33. Final module summary
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "MODULE 06 COMPLETE — Spatial transcriptomics assembly and QC\n",
-  "============================================================\n",
-  "Input slides:              ", length(spatial_objects), "\n",
-  "Features:                  ", nrow(spatial_qc), "\n",
-  "Spots before QC:           ", spots_before_filtering, "\n",
-  "Spots after QC:            ", spots_after_filtering, "\n",
-  "Spots removed:             ", spots_removed, "\n",
-  "Samples retained:          ",
-  length(unique(spatial_qc$sample)),
-  "\n",
-  "Spatial images retained:   ",
-  length(Seurat::Images(spatial_qc)),
-  "\n",
-  "Minimum features:          ", minimum_features, "\n",
-  "Maximum mitochondrial RNA: ", maximum_percent_mt, "%\n",
-  "\n",
-  "Primary output:\n",
-  "  ", qc_filtered_file, "\n",
-  "\n",
-  "QC result tables:\n",
-  "  ", results_directory, "\n",
-  "\n",
-  "QC figures:\n",
-  "  ", figure_directory, "\n",
-  "\n",
-  "Next module:\n",
-  "  07_spatial_normalization_clustering.Rmd\n",
-  "============================================================\n\n",
-  sep = ""
+message(
+  "Module 06 complete: ",
+  ncol(spatial_merge),
+  " spots before QC; ",
+  ncol(spatial_qc),
+  " spots after QC; ",
+  round(
+    100 * ncol(spatial_qc) / ncol(spatial_merge),
+    1
+  ),
+  "% retained."
 )
 ```
 

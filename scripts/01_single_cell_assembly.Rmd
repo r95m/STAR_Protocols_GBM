@@ -1,0 +1,389 @@
+---
+title: "Module 01: Assemble single-cell RNA-seq Seurat object"
+output: html_document
+---
+
+```{r}
+
+#==============================================================================
+# MODULE 01 — Assemble single-cell RNA-seq Seurat object
+#==============================================================================
+
+# Purpose:
+#   Import raw 10x count matrices, create sample-level Seurat objects,
+#   harmonize genes across samples, merge samples, calculate basic QC metadata,
+#   and save objects for downstream analysis.
+#
+# Input:
+#   data/raw/single_cell_raw/
+#
+# Output:
+#   data/processed/single_cell/
+#
+# Notes:
+#   Only permissive filtering is applied during object creation
+#   (min.cells = 3, min.features = 200).
+#   Detailed cell-level QC is performed in Module 02.
+
+
+#------------------------------------------------------------------------------
+# 1. Setup
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Matrix)
+  library(here)
+})
+
+set.seed(1234)
+
+input_directory <- here::here(
+  "data",
+  "raw",
+  "single_cell_raw"
+)
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell"
+)
+
+dir.create(
+  processed_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+if (!dir.exists(input_directory)) {
+  stop(
+    "Input directory not found: ",
+    input_directory
+  )
+}
+
+
+# Define samples used in the analysis.
+# Add or remove rows here when adapting the workflow to another dataset.
+
+sample_info <- data.frame(
+  sample = c(
+    "C2_S2",
+    "N1_S3",
+    "N2_S4"
+  ),
+  gsm = c(
+    "GSM9021009",
+    "GSM9021010",
+    "GSM9021011"
+  ),
+  condition = c(
+    "Control",
+    "Niacin",
+    "Niacin"
+  ),
+  stringsAsFactors = FALSE
+)
+
+print(sample_info)
+
+
+#------------------------------------------------------------------------------
+# 2. Create sample-level Seurat objects
+#------------------------------------------------------------------------------
+
+create_seurat_object <- function(
+  gsm,
+  sample_name,
+  condition,
+  input_directory
+) {
+
+  message("Loading ", sample_name, "...")
+
+  matrix_file <- file.path(
+    input_directory,
+    paste0(gsm, "_", sample_name, "_matrix.mtx.gz")
+  )
+
+  barcode_file <- file.path(
+    input_directory,
+    paste0(gsm, "_", sample_name, "_barcodes.tsv.gz")
+  )
+
+  feature_file <- file.path(
+    input_directory,
+    paste0(gsm, "_", sample_name, "_features.tsv.gz")
+  )
+
+  required_files <- c(
+    matrix_file,
+    barcode_file,
+    feature_file
+  )
+
+  missing_files <- required_files[
+    !file.exists(required_files)
+  ]
+
+  if (length(missing_files) > 0) {
+    stop(
+      "Missing input file(s) for ",
+      sample_name,
+      ":\n",
+      paste(missing_files, collapse = "\n")
+    )
+  }
+
+
+  counts <- ReadMtx(
+    mtx = matrix_file,
+    cells = barcode_file,
+    features = feature_file,
+    feature.column = 2
+  )
+
+
+  # Apply only permissive filtering during object creation.
+  # Detailed QC filtering is performed in Module 02.
+
+  seurat_object <- CreateSeuratObject(
+    counts = counts,
+    project = sample_name,
+    min.cells = 3,
+    min.features = 200
+  )
+
+
+  # Add sample-level metadata.
+
+  seurat_object$sample <- sample_name
+  seurat_object$condition <- condition
+  seurat_object$GSM <- gsm
+
+
+  message(
+    sample_name,
+    ": ",
+    nrow(seurat_object),
+    " genes x ",
+    ncol(seurat_object),
+    " cells"
+  )
+
+  return(seurat_object)
+}
+
+
+# Process all samples defined in sample_info.
+
+single_cell_objects <- lapply(
+  seq_len(nrow(sample_info)),
+  function(i) {
+
+    create_seurat_object(
+      gsm = sample_info$gsm[i],
+      sample_name = sample_info$sample[i],
+      condition = sample_info$condition[i],
+      input_directory = input_directory
+    )
+  }
+)
+
+names(single_cell_objects) <- sample_info$sample
+
+
+#------------------------------------------------------------------------------
+# 3. Harmonize genes across samples
+#------------------------------------------------------------------------------
+
+# Retain a common feature space across all samples before merging.
+
+common_genes <- Reduce(
+  intersect,
+  lapply(
+    single_cell_objects,
+    rownames
+  )
+)
+
+if (length(common_genes) == 0) {
+  stop(
+    "No genes are shared across all samples."
+  )
+}
+
+single_cell_objects <- lapply(
+  single_cell_objects,
+  subset,
+  features = common_genes
+)
+
+message(
+  "Shared genes retained: ",
+  length(common_genes)
+)
+
+
+#------------------------------------------------------------------------------
+# 4. Merge samples
+#------------------------------------------------------------------------------
+
+message("Merging samples...")
+
+single_cell_merged <- merge(
+  x = single_cell_objects[[1]],
+  y = single_cell_objects[-1],
+  add.cell.ids = names(single_cell_objects),
+  project = "GSE298688"
+)
+
+DefaultAssay(single_cell_merged) <- "RNA"
+
+message(
+  "Merged object: ",
+  nrow(single_cell_merged),
+  " genes x ",
+  ncol(single_cell_merged),
+  " cells"
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Calculate basic QC metadata
+#------------------------------------------------------------------------------
+
+# Calculate mitochondrial transcript percentage.
+# This dataset uses mouse-style mitochondrial gene names beginning with "mt-".
+
+mitochondrial_genes <- grep(
+  "^mt-",
+  rownames(single_cell_merged),
+  value = TRUE
+)
+
+if (length(mitochondrial_genes) == 0) {
+
+  warning(
+    "No mitochondrial genes matched '^mt-'. ",
+    "Confirm the gene naming convention."
+  )
+
+} else {
+
+  single_cell_merged[["percent.mt"]] <- PercentageFeatureSet(
+    single_cell_merged,
+    pattern = "^mt-"
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 6. Inspect assembled object
+#------------------------------------------------------------------------------
+
+required_metadata <- c(
+  "sample",
+  "condition",
+  "GSM",
+  "nCount_RNA",
+  "nFeature_RNA",
+  "percent.mt"
+)
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(single_cell_merged@meta.data)
+)
+
+if (length(missing_metadata) > 0) {
+  stop(
+    "Missing required metadata: ",
+    paste(
+      missing_metadata,
+      collapse = ", "
+    )
+  )
+}
+
+
+# Review basic QC metrics before detailed filtering in Module 02.
+
+summary(
+  single_cell_merged@meta.data[
+    ,
+    c(
+      "nCount_RNA",
+      "nFeature_RNA",
+      "percent.mt"
+    )
+  ]
+)
+
+cat("\nCells per sample:\n")
+
+print(
+  table(
+    single_cell_merged$sample
+  )
+)
+
+cat("\nCells per condition:\n")
+
+print(
+  table(
+    single_cell_merged$condition
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Save objects
+#------------------------------------------------------------------------------
+
+# Save individual sample objects.
+
+for (sample_name in names(single_cell_objects)) {
+
+  output_file <- file.path(
+    processed_directory,
+    paste0(
+      sample_name,
+      "_raw_seurat.rds"
+    )
+  )
+
+  saveRDS(
+    single_cell_objects[[sample_name]],
+    output_file
+  )
+
+  message(
+    "Saved: ",
+    output_file
+  )
+}
+
+
+# Save merged object.
+
+merged_output_file <- file.path(
+  processed_directory,
+  "GSE298688_merged_raw_seurat.rds"
+)
+
+saveRDS(
+  single_cell_merged,
+  merged_output_file
+)
+
+message(
+  "Saved merged object: ",
+  merged_output_file
+)
+
+message("Module 01 complete.")
+
+```
+

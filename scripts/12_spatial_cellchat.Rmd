@@ -6,167 +6,77 @@ date: "2026-08-12"
 
 ```{r}
 #==============================================================================
-# MODULE 12 — Spatial CellChat communication analysis
+# MODULE 12 — Spatial CellChat signaling analysis
 #==============================================================================
-
-# Purpose:
-#   Perform spatial ligand-receptor communication analysis using CellChat on
-#   the final inferCNV + SingleR spatial Seurat object generated in Module 12.
-#   Construct a combined CellChat identity in which inferCNV-defined
-#   malignant-enriched spots are explicitly labeled "Malignant-enriched"
-#   and all remaining spots retain their predominant SingleR identity.
 #
-#   CellChat is run independently on each spatial slide. The module exports
-#   ligand-receptor and pathway-level interactions, examines incoming and
-#   outgoing signaling involving malignant-enriched spots, generates network
-#   and signaling-role visualizations, merges completed CellChat objects for
-#   cross-slide comparison, performs a descriptive comparison of malignant-
-#   associated signaling across tumor slides, and saves reusable CellChat
-#   objects and an updated spatial Seurat checkpoint.
+# Purpose:
+#   Infer global ligand-receptor signaling between spatial transcriptional
+#   identities.
+#
+# CellChat identities:
+#   - inferCNV malignant-enriched spots -> "Malignant-enriched"
+#   - remaining spots -> SingleR predicted spot identity
+#
+# Large identity groups are downsampled before CellChat inference to reduce
+# dominance by highly represented spatial identities.
+#
+# Important:
+#   Visium spots contain mixtures of cells. CellChat groups therefore represent
+#   predominant spatial transcriptional identities rather than pure cell types.
+#
+#   CellChat identifies potential signaling relationships from expression and
+#   prior ligand-receptor knowledge. These results do not demonstrate physical
+#   cell-cell contact, receptor activation, or signaling causality.
 #
 # Input:
-#   data/processed/spatial/
-#     spatial_tumor_final_infercnv_singleR.rds
+#   data/processed/spatial/spatial_tumor_final_infercnv_singleR.rds
 #
-# Primary CellChat objects:
-#   data/processed/spatial/cellchat/
-#     spatial_CellChat_all_samples.rds
-#     spatial_CellChat_merged.rds
-#
-# Per-slide CellChat objects:
-#   data/processed/spatial/cellchat/
-#     Normal_Tissue_CellChat.rds
-#     Vehicle_1_CellChat.rds
-#     Vehicle_2_CellChat.rds
-#     Niacin_Treatment_CellChat.rds
-#
-# Updated spatial object:
-#   data/processed/spatial/
-#     spatial_tumor_final_infercnv_singleR_CellChat.rds
-#
-# Output tables:
-#   results/spatial/cellchat/
-#   results/spatial/cellchat/per_sample/
-#   results/spatial/cellchat/cross_slide/
-#
-# Output figures:
-#   figures/spatial/cellchat/
-#   figures/spatial/cellchat/per_sample/
-#   figures/spatial/cellchat/cross_slide/
-#
-# CellChat grouping strategy:
-#   Malignant-enriched inferCNV spot -> "Malignant-enriched"
-#   All remaining spots             -> predicted_spot_identity
-#
-# CellChat settings:
-#   Assay:              Spatial
-#   Database:           CellChatDB.mouse
-#   Probability method: triMean
-#   Minimum spots/group: 10
-#   raw.use:            TRUE
-#
-# Cross-slide comparison:
-#   - Descriptive / exploratory only.
-#   - Interaction probabilities are not treatment-level statistical tests.
-#   - Niacin-enriched interactions are defined here as:
-#       Niacin probability > 0
-#       Niacin / mean vehicle probability >= 1.5
-#       Niacin probability > mean vehicle probability
-#
-# Notes:
-#   - Visium spots contain mixtures of cells. CellChat identities therefore
-#     represent enriched/predominant transcriptional states rather than pure
-#     single-cell populations.
-#   - CellChat infers potential signaling relationships from expression and
-#     prior ligand-receptor knowledge. It does not demonstrate direct binding,
-#     receptor activation, cell-cell contact, or causal signaling.
+# Output:
+#   CellChat object, interaction/pathway tables, downsampling summary,
+#   and global signaling figures.
 #==============================================================================
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
   library(Seurat)
   library(SeuratObject)
   library(CellChat)
-  library(Matrix)
   library(dplyr)
   library(tidyr)
+  library(tibble)
   library(ggplot2)
-  library(patchwork)
-  library(scales)
+  library(ComplexHeatmap)
   library(here)
 })
-
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
 
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
+# Analysis settings
 
-cellchat_assay <- "Spatial"
-
-sample_column <- "sample"
+spatial_assay <- "Spatial"
 
 singleR_column <- "predicted_spot_identity"
-
 malignancy_column <- "malignancy_annotation"
-
 cellchat_group_column <- "CellChat_identity"
 
 malignant_label <- "Malignant-enriched"
+uncertain_label <- "Uncertain"
 
 minimum_spots_per_group <- 10
+max_spots_per_identity <- 1000
 
-normalization_scale_factor <- 10000
+communication_mean_type <- "truncatedMean"
+communication_trim <- 0.10
 
-communication_method <- "triMean"
-
-niacin_fold_threshold <- 1.5
-
-
-sample_order <- c(
-  "Normal_Tissue",
-  "Vehicle_1",
-  "Vehicle_2",
-  "Niacin_Treatment"
-)
+top_n_pathways <- 20
 
 
-tumor_samples <- c(
-  "Vehicle_1",
-  "Vehicle_2",
-  "Niacin_Treatment"
-)
-
-
-sample_images <- c(
-  Normal_Tissue = "Naive_A9",
-  Vehicle_1 = "Vehicle1_C5",
-  Vehicle_2 = "Vehicle2_D5",
-  Niacin_Treatment = "Niacin2_B5"
-)
-
-
-sample_titles <- c(
-  Normal_Tissue = "Normal Tissue",
-  Vehicle_1 = "Vehicle 1",
-  Vehicle_2 = "Vehicle 2",
-  Niacin_Treatment = "Niacin Treatment"
-)
-
-
-#------------------------------------------------------------------------------
-# 4. Define repository paths
-#------------------------------------------------------------------------------
+# Repository paths
 
 processed_directory <- here::here(
   "data",
@@ -187,169 +97,70 @@ results_directory <- here::here(
   "cellchat"
 )
 
-per_sample_results_directory <- here::here(
-  "results",
-  "spatial",
-  "cellchat",
-  "per_sample"
-)
-
-cross_slide_results_directory <- here::here(
-  "results",
-  "spatial",
-  "cellchat",
-  "cross_slide"
-)
-
 figure_directory <- here::here(
   "figures",
   "spatial",
   "cellchat"
 )
 
-per_sample_figure_directory <- here::here(
-  "figures",
-  "spatial",
-  "cellchat",
-  "per_sample"
-)
 
-cross_slide_figure_directory <- here::here(
-  "figures",
-  "spatial",
-  "cellchat",
-  "cross_slide"
-)
-
-
-directories_to_create <- c(
+dir.create(
   cellchat_object_directory,
-  results_directory,
-  per_sample_results_directory,
-  cross_slide_results_directory,
-  figure_directory,
-  per_sample_figure_directory,
-  cross_slide_figure_directory
+  recursive = TRUE,
+  showWarnings = FALSE
 )
 
-for (directory in directories_to_create) {
-  dir.create(
-    directory,
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-}
+dir.create(
+  results_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
+dir.create(
+  figure_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
-#------------------------------------------------------------------------------
-# 5. Define input and output files
-#------------------------------------------------------------------------------
 
 input_file <- file.path(
   processed_directory,
   "spatial_tumor_final_infercnv_singleR.rds"
 )
 
-all_cellchat_file <- file.path(
+cellchat_object_file <- file.path(
   cellchat_object_directory,
-  "spatial_CellChat_all_samples.rds"
-)
-
-merged_cellchat_file <- file.path(
-  cellchat_object_directory,
-  "spatial_CellChat_merged.rds"
-)
-
-updated_spatial_file <- file.path(
-  processed_directory,
-  "spatial_tumor_final_infercnv_singleR_CellChat.rds"
-)
-
-identity_table_file <- file.path(
-  results_directory,
-  "spatial_CellChat_spot_identities.csv"
-)
-
-summary_file <- file.path(
-  results_directory,
-  "spatial_CellChat_summary.csv"
-)
-
-malignant_summary_file <- file.path(
-  results_directory,
-  "spatial_CellChat_malignant_signaling_summary.csv"
-)
-
-parameter_file <- file.path(
-  results_directory,
-  "spatial_CellChat_parameters.csv"
-)
-
-
-cat(
-  "\n============================================================\n",
-  "MODULE 13 — Spatial CellChat communication analysis\n",
-  "============================================================\n",
-  "Repository root:         ", here::here(), "\n",
-  "Input object:            ", input_file, "\n",
-  "CellChat objects:        ", cellchat_object_directory, "\n",
-  "Results directory:      ", results_directory, "\n",
-  "Per-sample results:      ", per_sample_results_directory, "\n",
-  "Cross-slide results:     ", cross_slide_results_directory, "\n",
-  "Figure directory:       ", figure_directory, "\n",
-  "============================================================\n\n",
-  sep = ""
+  "spatial_CellChat_global.rds"
 )
 
 
 #------------------------------------------------------------------------------
-# 6. Validate and load Module 12 output
+# 2. Load spatial object
 #------------------------------------------------------------------------------
 
 if (!file.exists(input_file)) {
   stop(
-    "Module 12 output was not found:\n",
-    input_file,
-    "\n\nRun 12_spatial_singleR.Rmd before Module 13."
+    "Input spatial object was not found: ",
+    input_file
   )
 }
 
-cat(
-  "Loading final inferCNV + SingleR spatial object...\n"
-)
 
 spatial_cellchat <- readRDS(
   input_file
 )
 
-if (!inherits(spatial_cellchat, "Seurat")) {
+
+if (!spatial_assay %in% names(spatial_cellchat@assays)) {
   stop(
-    "Loaded input file is not a valid Seurat object."
+    "Spatial assay was not found."
   )
 }
 
-available_assays <- names(
-  spatial_cellchat@assays
-)
-
-if (!cellchat_assay %in% available_assays) {
-  stop(
-    "Required CellChat assay was not found: ",
-    cellchat_assay,
-    "\nAvailable assays: ",
-    paste(
-      available_assays,
-      collapse = ", "
-    )
-  )
-}
 
 required_metadata <- c(
-  sample_column,
   singleR_column,
-  malignancy_column,
-  "infercnv_input_group",
-  "infercnv_status"
+  malignancy_column
 )
 
 missing_metadata <- setdiff(
@@ -359,7 +170,7 @@ missing_metadata <- setdiff(
 
 if (length(missing_metadata) > 0) {
   stop(
-    "Required metadata column(s) missing:\n",
+    "Required metadata missing: ",
     paste(
       missing_metadata,
       collapse = ", "
@@ -367,340 +178,291 @@ if (length(missing_metadata) > 0) {
   )
 }
 
-if (anyDuplicated(colnames(spatial_cellchat)) > 0) {
-  stop(
-    "Duplicated spatial spot barcodes were detected."
-  )
-}
 
-cat(
-  "Spatial object loaded successfully:\n",
-  "  Features: ", nrow(spatial_cellchat), "\n",
-  "  Spots:    ", ncol(spatial_cellchat), "\n",
-  "  Samples:  ",
-  length(
-    unique(
-      spatial_cellchat@meta.data[[sample_column]]
-    )
-  ),
-  "\n",
-  sep = ""
+DefaultAssay(
+  spatial_cellchat
+) <- spatial_assay
+
+
+message(
+  "Loaded ",
+  ncol(spatial_cellchat),
+  " spatial spots."
 )
 
 
 #------------------------------------------------------------------------------
-# 7. Validate samples and spatial images
+# 3. Define CellChat identities
 #------------------------------------------------------------------------------
 
-available_samples <- unique(
+# Malignant-enriched inferCNV spots form their own signaling group.
+# Remaining spots retain their predominant SingleR identity.
+
+spatial_cellchat$CellChat_identity <- ifelse(
+  spatial_cellchat@meta.data[[malignancy_column]] == malignant_label,
+  malignant_label,
   as.character(
-    spatial_cellchat@meta.data[[sample_column]]
-  )
-)
-
-missing_samples <- setdiff(
-  sample_order,
-  available_samples
-)
-
-if (length(missing_samples) > 0) {
-  stop(
-    "Expected spatial sample(s) missing:\n",
-    paste(
-      missing_samples,
-      collapse = ", "
-    )
-  )
-}
-
-missing_images <- setdiff(
-  unname(sample_images),
-  Seurat::Images(spatial_cellchat)
-)
-
-if (length(missing_images) > 0) {
-  stop(
-    "Expected spatial image(s) missing:\n",
-    paste(
-      missing_images,
-      collapse = ", "
-    )
-  )
-}
-
-cat(
-  "\nSpots by sample:\n"
-)
-
-print(
-  table(
-    spatial_cellchat@meta.data[[sample_column]]
-  )
-)
-
-cat(
-  "\nSingleR identities:\n"
-)
-
-print(
-  sort(
-    table(
-      spatial_cellchat@meta.data[[singleR_column]],
-      useNA = "ifany"
-    ),
-    decreasing = TRUE
-  )
-)
-
-cat(
-  "\nMalignancy annotations:\n"
-)
-
-print(
-  table(
-    spatial_cellchat@meta.data[[malignancy_column]],
-    useNA = "ifany"
+    spatial_cellchat@meta.data[[singleR_column]]
   )
 )
 
 
-#------------------------------------------------------------------------------
-# 8. Create combined CellChat identity
-#------------------------------------------------------------------------------
+# Remove spots without a usable identity.
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Creating combined SingleR + malignant CellChat identity\n",
-  "------------------------------------------------------------\n"
+valid_identity <- !is.na(
+  spatial_cellchat$CellChat_identity
+) &
+  spatial_cellchat$CellChat_identity != "" &
+  spatial_cellchat$CellChat_identity != uncertain_label
+
+
+spatial_cellchat <- subset(
+  spatial_cellchat,
+  cells = colnames(spatial_cellchat)[valid_identity]
 )
 
-singleR_identity <- as.character(
-  spatial_cellchat@meta.data[[singleR_column]]
-)
 
-malignancy_identity <- as.character(
-  spatial_cellchat@meta.data[[malignancy_column]]
-)
+# Remove identities represented by fewer than the minimum number of spots.
 
-spatial_cellchat$CellChat_identity <- dplyr::case_when(
-  malignancy_identity == malignant_label ~
-    malignant_label,
-
-  is.na(singleR_identity) ~
-    "Uncertain",
-
-  singleR_identity == "" ~
-    "Uncertain",
-
-  TRUE ~
-    singleR_identity
-)
-
-spatial_cellchat$CellChat_identity <- factor(
+identity_counts <- table(
   spatial_cellchat$CellChat_identity
 )
 
-cat(
-  "\nCombined CellChat identities:\n"
-)
 
-print(
-  sort(
-    table(
-      spatial_cellchat$CellChat_identity,
-      useNA = "ifany"
-    ),
-    decreasing = TRUE
-  )
-)
-
-cat(
-  "\nCellChat identity by sample:\n"
-)
-
-print(
-  table(
-    spatial_cellchat@meta.data[[sample_column]],
-    spatial_cellchat$CellChat_identity,
-    useNA = "ifany"
-  )
-)
-
-cat(
-  "\nCellChat identity by malignancy annotation:\n"
-)
-
-print(
-  table(
-    spatial_cellchat@meta.data[[malignancy_column]],
-    spatial_cellchat$CellChat_identity,
-    useNA = "ifany"
-  )
+valid_groups <- names(
+  identity_counts[
+    identity_counts >= minimum_spots_per_group
+  ]
 )
 
 
-#------------------------------------------------------------------------------
-# 9. Save CellChat spot-identity table
-#------------------------------------------------------------------------------
+spatial_cellchat <- subset(
+  spatial_cellchat,
+  cells = colnames(spatial_cellchat)[
+    spatial_cellchat$CellChat_identity %in% valid_groups
+  ]
+)
 
-cellchat_identity_table <- data.frame(
-  spot = rownames(
-    spatial_cellchat@meta.data
-  ),
-  sample = as.character(
-    spatial_cellchat@meta.data[[sample_column]]
-  ),
-  predicted_spot_identity = as.character(
-    spatial_cellchat@meta.data[[singleR_column]]
-  ),
-  malignancy_annotation = as.character(
-    spatial_cellchat@meta.data[[malignancy_column]]
-  ),
-  infercnv_status = as.character(
-    spatial_cellchat$infercnv_status
-  ),
-  CellChat_identity = as.character(
+
+spatial_cellchat$CellChat_identity <- droplevels(
+  factor(
     spatial_cellchat$CellChat_identity
-  ),
-  stringsAsFactors = FALSE
+  )
 )
 
-utils::write.csv(
-  cellchat_identity_table,
-  identity_table_file,
+
+if (length(levels(spatial_cellchat$CellChat_identity)) < 2) {
+  stop(
+    "Fewer than two CellChat identities remain after filtering."
+  )
+}
+
+
+message(
+  ncol(spatial_cellchat),
+  " eligible spots across ",
+  length(levels(spatial_cellchat$CellChat_identity)),
+  " CellChat identities."
+)
+
+
+#------------------------------------------------------------------------------
+# 4. Downsample large CellChat identities
+#------------------------------------------------------------------------------
+
+# Large identity groups are capped at 1,000 spots.
+# Smaller groups are retained in full.
+
+sampling_metadata <- spatial_cellchat@meta.data %>%
+  tibble::rownames_to_column(
+    "spot"
+  )
+
+
+counts_before <- sampling_metadata %>%
+  dplyr::count(
+    CellChat_identity,
+    name = "spots_available"
+  )
+
+
+set.seed(1234)
+
+
+selected_spots <- sampling_metadata %>%
+  dplyr::group_by(
+    CellChat_identity
+  ) %>%
+  dplyr::group_modify(
+    ~ {
+
+      if (nrow(.x) > max_spots_per_identity) {
+
+        dplyr::slice_sample(
+          .x,
+          n = max_spots_per_identity
+        )
+
+      } else {
+
+        .x
+
+      }
+
+    }
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::pull(
+    spot
+  )
+
+
+spatial_cellchat <- subset(
+  spatial_cellchat,
+  cells = selected_spots
+)
+
+
+spatial_cellchat$CellChat_identity <- droplevels(
+  factor(
+    spatial_cellchat$CellChat_identity
+  )
+)
+
+
+counts_after <- spatial_cellchat@meta.data %>%
+  tibble::rownames_to_column(
+    "spot"
+  ) %>%
+  dplyr::count(
+    CellChat_identity,
+    name = "spots_used"
+  )
+
+
+downsampling_summary <- counts_before %>%
+  dplyr::left_join(
+    counts_after,
+    by = "CellChat_identity"
+  ) %>%
+  dplyr::mutate(
+    spots_used = dplyr::coalesce(
+      spots_used,
+      0L
+    ),
+    fraction_used = spots_used / spots_available
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(spots_available)
+  )
+
+
+print(
+  downsampling_summary
+)
+
+
+write.csv(
+  downsampling_summary,
+  file.path(
+    results_directory,
+    "spatial_CellChat_downsampling_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
+message(
+  sum(downsampling_summary$spots_available),
+  " eligible spots reduced to ",
+  sum(downsampling_summary$spots_used),
+  " spots after downsampling."
+)
+
+
 #------------------------------------------------------------------------------
-# 10. Create consistent CellChat identity palette
+# 5. Plot downsampling summary
 #------------------------------------------------------------------------------
 
-cellchat_identities <- sort(
-  unique(
-    as.character(
-      spatial_cellchat$CellChat_identity
+downsampling_plot_data <- downsampling_summary %>%
+  dplyr::select(
+    CellChat_identity,
+    spots_available,
+    spots_used
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      spots_available,
+      spots_used
+    ),
+    names_to = "dataset",
+    values_to = "n_spots"
+  ) %>%
+  dplyr::mutate(
+    dataset = dplyr::recode(
+      dataset,
+      spots_available = "Before downsampling",
+      spots_used = "Used for CellChat"
     )
   )
-)
-
-cellchat_colors <- stats::setNames(
-  scales::hue_pal()(
-    length(cellchat_identities)
-  ),
-  cellchat_identities
-)
-
-if (malignant_label %in% names(cellchat_colors)) {
-  cellchat_colors[malignant_label] <- "#D73027"
-}
 
 
-#------------------------------------------------------------------------------
-# 11. Visualize combined CellChat identity spatially
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating spatial CellChat identity maps\n",
-  "------------------------------------------------------------\n"
-)
-
-cellchat_spatial_plots <- list()
-
-cellchat_spatial_files <- character(0)
-
-for (sample_name in sample_order) {
-  image_name <- sample_images[[sample_name]]
-
-  current_plot <- Seurat::SpatialDimPlot(
-    object = spatial_cellchat,
-    images = image_name,
-    group.by = cellchat_group_column,
-    cols = cellchat_colors,
-    pt.size.factor = 1.6,
-    stroke = 0
+downsampling_plot <- ggplot(
+  downsampling_plot_data,
+  aes(
+    x = reorder(
+      CellChat_identity,
+      n_spots
+    ),
+    y = n_spots,
+    fill = dataset
+  )
+) +
+  geom_col(
+    position = "dodge"
   ) +
-    ggplot2::labs(
-      title = sample_titles[[sample_name]]
-    ) +
-    ggplot2::theme(
-      legend.title = ggplot2::element_blank()
-    )
-
-  current_file <- file.path(
-    figure_directory,
-    paste0(
-      sample_name,
-      "_CellChat_identity_spatial.png"
-    )
+  coord_flip() +
+  labs(
+    title = "CellChat identity representation",
+    x = NULL,
+    y = "Number of spatial spots",
+    fill = NULL
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    legend.position = "top"
   )
 
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 8,
-    height = 8,
-    dpi = 600
-  )
-
-  cellchat_spatial_plots[[sample_name]] <- current_plot
-
-  cellchat_spatial_files <- c(
-    cellchat_spatial_files,
-    current_file
-  )
-}
-
-
-combined_identity_plot <- patchwork::wrap_plots(
-  cellchat_spatial_plots,
-  ncol = 2,
-  guides = "collect"
-) &
-  ggplot2::theme(
-    legend.position = "right"
-  )
-
-combined_identity_file <- file.path(
-  figure_directory,
-  "spatial_CellChat_identity_all_samples.png"
-)
-
-ggplot2::ggsave(
-  filename = combined_identity_file,
-  plot = combined_identity_plot,
-  width = 18,
-  height = 14,
-  dpi = 600,
-  limitsize = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 12. Prepare normalized Spatial expression
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Preparing normalized Spatial expression for CellChat\n",
-  "------------------------------------------------------------\n"
-)
-
-Seurat::DefaultAssay(
-  spatial_cellchat
-) <- cellchat_assay
-
-spatial_layers <- SeuratObject::Layers(
-  spatial_cellchat[[cellchat_assay]]
-)
-
-cat(
-  "Spatial assay layers before preparation:\n"
-)
 
 print(
-  spatial_layers
+  downsampling_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_downsampling_summary.png"
+  ),
+  downsampling_plot,
+  width = 9,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Prepare Spatial expression
+#------------------------------------------------------------------------------
+
+spatial_layers <- SeuratObject::Layers(
+  spatial_cellchat[[spatial_assay]]
 )
 
 count_layers <- grep(
@@ -709,2260 +471,777 @@ count_layers <- grep(
   value = TRUE
 )
 
-if (length(count_layers) == 0) {
-  stop(
-    "No raw Spatial count layer was detected."
-  )
-}
 
 if (length(count_layers) > 1) {
+
   spatial_cellchat <- SeuratObject::JoinLayers(
     spatial_cellchat,
-    assay = cellchat_assay
-  )
-}
-
-spatial_layers <- SeuratObject::Layers(
-  spatial_cellchat[[cellchat_assay]]
-)
-
-if (!"data" %in% spatial_layers) {
-  cat(
-    "Normalized Spatial data layer not found.\n",
-    "Running LogNormalize...\n",
-    sep = ""
-  )
-
-  spatial_cellchat <- Seurat::NormalizeData(
-    object = spatial_cellchat,
-    assay = cellchat_assay,
-    normalization.method = "LogNormalize",
-    scale.factor = normalization_scale_factor,
-    verbose = FALSE
-  )
-}
-
-if (!"data" %in%
-    SeuratObject::Layers(spatial_cellchat[[cellchat_assay]])) {
-  stop(
-    "Normalized Spatial 'data' layer could not be generated."
-  )
-}
-
-cat(
-  "Normalized Spatial expression is ready.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 13. Load CellChat mouse ligand-receptor database
-#------------------------------------------------------------------------------
-
-CellChatDB_use <- CellChat::CellChatDB.mouse
-
-cat(
-  "\nCellChat mouse ligand-receptor interactions: ",
-  nrow(CellChatDB_use$interaction),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 14. Define per-slide CellChat function
-#------------------------------------------------------------------------------
-
-run_spatial_cellchat <- function(
-    seurat_object,
-    sample_name,
-    sample_column,
-    group_column,
-    assay_name,
-    cellchat_database,
-    cellchat_object_directory,
-    per_sample_results_directory,
-    per_sample_figure_directory,
-    minimum_spots_per_group,
-    communication_method
-) {
-
-  cat(
-    "\n============================================================\n",
-    "Running CellChat — ",
-    sample_name,
-    "\n",
-    "============================================================\n",
-    sep = ""
-  )
-
-
-  sample_cells <- rownames(
-    seurat_object@meta.data
-  )[
-    seurat_object@meta.data[[sample_column]] ==
-      sample_name
-  ]
-
-  if (length(sample_cells) == 0) {
-    warning(
-      "No spots found for sample: ",
-      sample_name
-    )
-
-    return(NULL)
-  }
-
-  sample_object <- subset(
-    seurat_object,
-    cells = sample_cells
-  )
-
-  group_values <- as.character(
-    sample_object@meta.data[[group_column]]
-  )
-
-  valid_cells <- colnames(sample_object)[
-    !is.na(group_values) &
-    group_values != ""
-  ]
-
-  sample_object <- subset(
-    sample_object,
-    cells = valid_cells
-  )
-
-  sample_object@meta.data[[group_column]] <- droplevels(
-    factor(
-      sample_object@meta.data[[group_column]]
-    )
-  )
-
-  group_counts <- table(
-    sample_object@meta.data[[group_column]]
-  )
-
-  cat(
-    "\nInitial CellChat groups:\n"
-  )
-
-  print(
-    sort(
-      group_counts,
-      decreasing = TRUE
-    )
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Remove groups below the minimum support threshold
-  #--------------------------------------------------------------------------
-
-  groups_to_keep <- names(
-    group_counts[
-      group_counts >= minimum_spots_per_group
-    ]
-  )
-
-  groups_removed <- names(
-    group_counts[
-      group_counts < minimum_spots_per_group
-    ]
-  )
-
-  if (length(groups_removed) > 0) {
-    cat(
-      "Removing groups with fewer than ",
-      minimum_spots_per_group,
-      " spots:\n",
-      paste(
-        groups_removed,
-        collapse = ", "
-      ),
-      "\n",
-      sep = ""
-    )
-  }
-
-  keep_cells <- colnames(sample_object)[
-    sample_object@meta.data[[group_column]] %in%
-      groups_to_keep
-  ]
-
-  sample_object <- subset(
-    sample_object,
-    cells = keep_cells
-  )
-
-  sample_object@meta.data[[group_column]] <- droplevels(
-    factor(
-      sample_object@meta.data[[group_column]]
-    )
-  )
-
-  final_group_counts <- table(
-    sample_object@meta.data[[group_column]]
-  )
-
-  if (length(final_group_counts) < 2) {
-    warning(
-      "Fewer than two valid CellChat groups remain for ",
-      sample_name,
-      ". Skipping sample."
-    )
-
-    return(NULL)
-  }
-
-  cat(
-    "\nFinal CellChat groups:\n"
-  )
-
-  print(
-    sort(
-      final_group_counts,
-      decreasing = TRUE
-    )
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Extract normalized expression
-  #--------------------------------------------------------------------------
-
-  expression_matrix <- SeuratObject::LayerData(
-    object = sample_object,
-    assay = assay_name,
-    layer = "data"
-  )
-
-  expression_matrix <- methods::as(
-    expression_matrix,
-    "dgCMatrix"
-  )
-
-  expression_matrix <- expression_matrix[
-    ,
-    colnames(sample_object),
-    drop = FALSE
-  ]
-
-  if (!identical(
-    colnames(expression_matrix),
-    colnames(sample_object)
-  )) {
-    stop(
-      "Expression matrix and Seurat spot order do not match for ",
-      sample_name
-    )
-  }
-
-
-  #--------------------------------------------------------------------------
-  # Create CellChat metadata
-  #--------------------------------------------------------------------------
-
-  cellchat_metadata <- data.frame(
-    cell_type = as.character(
-      sample_object@meta.data[[group_column]]
-    ),
-    row.names = colnames(sample_object),
-    stringsAsFactors = FALSE
-  )
-
-  cellchat_metadata$cell_type <- factor(
-    cellchat_metadata$cell_type
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Create CellChat object
-  #--------------------------------------------------------------------------
-
-  cellchat <- CellChat::createCellChat(
-    object = expression_matrix,
-    meta = cellchat_metadata,
-    group.by = "cell_type"
-  )
-
-  cellchat@DB <- cellchat_database
-
-
-  #--------------------------------------------------------------------------
-  # Run CellChat inference
-  #--------------------------------------------------------------------------
-
-  cellchat <- CellChat::subsetData(
-    cellchat
-  )
-
-  cellchat <- CellChat::identifyOverExpressedGenes(
-    cellchat,
-    do.fast = FALSE
-  )
-
-  cellchat <- CellChat::identifyOverExpressedInteractions(
-    cellchat
-  )
-
-  cellchat <- CellChat::computeCommunProb(
-    cellchat,
-    type = communication_method,
-    raw.use = TRUE
-  )
-
-  cellchat <- CellChat::filterCommunication(
-    cellchat,
-    min.cells = minimum_spots_per_group
-  )
-
-  cellchat <- CellChat::computeCommunProbPathway(
-    cellchat
-  )
-
-  cellchat <- CellChat::aggregateNet(
-    cellchat
-  )
-
-  cellchat <- CellChat::netAnalysis_computeCentrality(
-    cellchat,
-    slot.name = "netP"
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Extract communication tables
-  #--------------------------------------------------------------------------
-
-  communication_table <- as.data.frame(
-    CellChat::subsetCommunication(
-      cellchat
-    ),
-    stringsAsFactors = FALSE
-  )
-
-  pathway_table <- as.data.frame(
-    CellChat::subsetCommunication(
-      cellchat,
-      slot.name = "netP"
-    ),
-    stringsAsFactors = FALSE
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Define sample-level output files
-  #--------------------------------------------------------------------------
-
-  interaction_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CellChat_interactions.csv"
-    )
-  )
-
-  pathway_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CellChat_pathways.csv"
-    )
-  )
-
-  cell_count_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CellChat_group_counts.csv"
-    )
-  )
-
-  cellchat_object_file <- file.path(
-    cellchat_object_directory,
-    paste0(
-      sample_name,
-      "_CellChat.rds"
-    )
-  )
-
-
-  utils::write.csv(
-    communication_table,
-    interaction_file,
-    row.names = FALSE
-  )
-
-  utils::write.csv(
-    pathway_table,
-    pathway_file,
-    row.names = FALSE
-  )
-
-  group_count_table <- data.frame(
-    CellChat_identity = names(final_group_counts),
-    spots = as.integer(final_group_counts),
-    stringsAsFactors = FALSE
-  )
-
-  utils::write.csv(
-    group_count_table,
-    cell_count_file,
-    row.names = FALSE
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Extract malignant-associated signaling
-  #--------------------------------------------------------------------------
-
-  malignant_interaction_file <- NULL
-  malignant_outgoing_file <- NULL
-  malignant_incoming_file <- NULL
-
-  malignant_interactions <- data.frame()
-  malignant_outgoing <- data.frame()
-  malignant_incoming <- data.frame()
-
-  if (malignant_label %in% levels(cellchat@idents)) {
-    malignant_interactions <- communication_table %>%
-      dplyr::filter(
-        source == malignant_label |
-        target == malignant_label
-      )
-
-    malignant_outgoing <- communication_table %>%
-      dplyr::filter(
-        source == malignant_label
-      ) %>%
-      dplyr::arrange(
-        dplyr::desc(prob)
-      )
-
-    malignant_incoming <- communication_table %>%
-      dplyr::filter(
-        target == malignant_label
-      ) %>%
-      dplyr::arrange(
-        dplyr::desc(prob)
-      )
-
-    malignant_interaction_file <- file.path(
-      per_sample_results_directory,
-      paste0(
-        sample_name,
-        "_Malignant_all_interactions.csv"
-      )
-    )
-
-    malignant_outgoing_file <- file.path(
-      per_sample_results_directory,
-      paste0(
-        sample_name,
-        "_Malignant_outgoing_interactions.csv"
-      )
-    )
-
-    malignant_incoming_file <- file.path(
-      per_sample_results_directory,
-      paste0(
-        sample_name,
-        "_Malignant_incoming_interactions.csv"
-      )
-    )
-
-    utils::write.csv(
-      malignant_interactions,
-      malignant_interaction_file,
-      row.names = FALSE
-    )
-
-    utils::write.csv(
-      malignant_outgoing,
-      malignant_outgoing_file,
-      row.names = FALSE
-    )
-
-    utils::write.csv(
-      malignant_incoming,
-      malignant_incoming_file,
-      row.names = FALSE
-    )
-  }
-
-
-  #--------------------------------------------------------------------------
-  # Generate interaction-number circle plot
-  #--------------------------------------------------------------------------
-
-  group_size <- as.numeric(
-    table(
-      cellchat@idents
-    )
-  )
-
-  interaction_number_file <- file.path(
-    per_sample_figure_directory,
-    paste0(
-      sample_name,
-      "_interaction_number_circle.pdf"
-    )
-  )
-
-  grDevices::pdf(
-    interaction_number_file,
-    width = 9,
-    height = 9
-  )
-
-  CellChat::netVisual_circle(
-    cellchat@net$count,
-    vertex.weight = group_size,
-    weight.scale = TRUE,
-    label.edge = FALSE,
-    title.name = paste0(
-      sample_name,
-      " — Number of interactions"
-    )
-  )
-
-  grDevices::dev.off()
-
-
-  #--------------------------------------------------------------------------
-  # Generate interaction-strength circle plot
-  #--------------------------------------------------------------------------
-
-  interaction_strength_file <- file.path(
-    per_sample_figure_directory,
-    paste0(
-      sample_name,
-      "_interaction_strength_circle.pdf"
-    )
-  )
-
-  grDevices::pdf(
-    interaction_strength_file,
-    width = 9,
-    height = 9
-  )
-
-  CellChat::netVisual_circle(
-    cellchat@net$weight,
-    vertex.weight = group_size,
-    weight.scale = TRUE,
-    label.edge = FALSE,
-    title.name = paste0(
-      sample_name,
-      " — Interaction strength"
-    )
-  )
-
-  grDevices::dev.off()
-
-
-  #--------------------------------------------------------------------------
-  # Generate outgoing signaling-role heatmap
-  #--------------------------------------------------------------------------
-
-  outgoing_heatmap_file <- file.path(
-    per_sample_figure_directory,
-    paste0(
-      sample_name,
-      "_outgoing_signaling_heatmap.pdf"
-    )
-  )
-
-  grDevices::pdf(
-    outgoing_heatmap_file,
-    width = 11,
-    height = 9
-  )
-
-  print(
-    CellChat::netAnalysis_signalingRole_heatmap(
-      cellchat,
-      pattern = "outgoing"
-    )
-  )
-
-  grDevices::dev.off()
-
-
-  #--------------------------------------------------------------------------
-  # Generate incoming signaling-role heatmap
-  #--------------------------------------------------------------------------
-
-  incoming_heatmap_file <- file.path(
-    per_sample_figure_directory,
-    paste0(
-      sample_name,
-      "_incoming_signaling_heatmap.pdf"
-    )
-  )
-
-  grDevices::pdf(
-    incoming_heatmap_file,
-    width = 11,
-    height = 9
-  )
-
-  print(
-    CellChat::netAnalysis_signalingRole_heatmap(
-      cellchat,
-      pattern = "incoming"
-    )
-  )
-
-  grDevices::dev.off()
-
-
-  #--------------------------------------------------------------------------
-  # Generate malignant-focused bubble plots
-  #--------------------------------------------------------------------------
-
-  malignant_outgoing_bubble_file <- NULL
-  malignant_incoming_bubble_file <- NULL
-
-  if (malignant_label %in% levels(cellchat@idents)) {
-    all_groups <- levels(
-      cellchat@idents
-    )
-
-    malignant_index <- which(
-      all_groups == malignant_label
-    )
-
-    non_malignant_indices <- which(
-      all_groups != malignant_label
-    )
-
-    if (length(non_malignant_indices) > 0) {
-      malignant_outgoing_bubble_file <- file.path(
-        per_sample_figure_directory,
-        paste0(
-          sample_name,
-          "_Malignant_outgoing_bubble.pdf"
-        )
-      )
-
-      grDevices::pdf(
-        malignant_outgoing_bubble_file,
-        width = 12,
-        height = 9
-      )
-
-      print(
-        CellChat::netVisual_bubble(
-          cellchat,
-          sources.use = malignant_index,
-          targets.use = non_malignant_indices,
-          remove.isolate = FALSE
-        )
-      )
-
-      grDevices::dev.off()
-
-
-      malignant_incoming_bubble_file <- file.path(
-        per_sample_figure_directory,
-        paste0(
-          sample_name,
-          "_Malignant_incoming_bubble.pdf"
-        )
-      )
-
-      grDevices::pdf(
-        malignant_incoming_bubble_file,
-        width = 12,
-        height = 9
-      )
-
-      print(
-        CellChat::netVisual_bubble(
-          cellchat,
-          sources.use = non_malignant_indices,
-          targets.use = malignant_index,
-          remove.isolate = FALSE
-        )
-      )
-
-      grDevices::dev.off()
-    }
-  }
-
-
-  #--------------------------------------------------------------------------
-  # Save completed CellChat object
-  #--------------------------------------------------------------------------
-
-  saveRDS(
-    object = cellchat,
-    file = cellchat_object_file,
-    compress = TRUE
-  )
-
-  if (!file.exists(cellchat_object_file)) {
-    stop(
-      "CellChat object was not saved for ",
-      sample_name
-    )
-  }
-
-
-  #--------------------------------------------------------------------------
-  # Return result information
-  #--------------------------------------------------------------------------
-
-  return(
-    list(
-      cellchat = cellchat,
-      sample_name = sample_name,
-      spots_analyzed = ncol(sample_object),
-      groups = length(final_group_counts),
-      group_counts = final_group_counts,
-      communication_table = communication_table,
-      pathway_table = pathway_table,
-      malignant_interactions = malignant_interactions,
-      malignant_outgoing = malignant_outgoing,
-      malignant_incoming = malignant_incoming,
-      object_file = cellchat_object_file,
-      interaction_file = interaction_file,
-      pathway_file = pathway_file,
-      cell_count_file = cell_count_file,
-      malignant_interaction_file = malignant_interaction_file,
-      malignant_outgoing_file = malignant_outgoing_file,
-      malignant_incoming_file = malignant_incoming_file,
-      interaction_number_file = interaction_number_file,
-      interaction_strength_file = interaction_strength_file,
-      outgoing_heatmap_file = outgoing_heatmap_file,
-      incoming_heatmap_file = incoming_heatmap_file,
-      malignant_outgoing_bubble_file = malignant_outgoing_bubble_file,
-      malignant_incoming_bubble_file = malignant_incoming_bubble_file
-    )
+    assay = spatial_assay
   )
 }
 
 
-#------------------------------------------------------------------------------
-# 15. Run CellChat independently across spatial slides
-#------------------------------------------------------------------------------
+# Independently log-normalize the Spatial assay for CellChat.
 
-cat(
-  "\n============================================================\n",
-  "Running per-slide spatial CellChat analyses\n",
-  "============================================================\n"
-)
-
-CellChat_results <- list()
-
-for (current_sample in sample_order) {
-  CellChat_results[[current_sample]] <- run_spatial_cellchat(
-    seurat_object = spatial_cellchat,
-    sample_name = current_sample,
-    sample_column = sample_column,
-    group_column = cellchat_group_column,
-    assay_name = cellchat_assay,
-    cellchat_database = CellChatDB_use,
-    cellchat_object_directory = cellchat_object_directory,
-    per_sample_results_directory = per_sample_results_directory,
-    per_sample_figure_directory = per_sample_figure_directory,
-    minimum_spots_per_group = minimum_spots_per_group,
-    communication_method = communication_method
-  )
-}
-
-CellChat_results <- CellChat_results[
-  !vapply(
-    CellChat_results,
-    is.null,
-    logical(1)
-  )
-]
-
-if (length(CellChat_results) == 0) {
-  stop(
-    "No spatial CellChat analyses completed successfully."
-  )
-}
-
-cat(
-  "\nSuccessfully completed CellChat samples:\n"
-)
-
-print(
-  names(
-    CellChat_results
-  )
+spatial_cellchat <- Seurat::NormalizeData(
+  spatial_cellchat,
+  assay = spatial_assay,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  verbose = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 16. Save complete CellChat result list
-#------------------------------------------------------------------------------
-
-cellchat_object_list <- lapply(
-  CellChat_results,
-  function(x) x$cellchat
-)
-
-saveRDS(
-  object = cellchat_object_list,
-  file = all_cellchat_file,
-  compress = TRUE
-)
-
-if (!file.exists(all_cellchat_file)) {
-  stop(
-    "Combined spatial CellChat result list was not saved."
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 17. Summarize communication networks
-#------------------------------------------------------------------------------
-
-cellchat_summary <- dplyr::bind_rows(
-  lapply(
-    names(CellChat_results),
-    function(sample_name) {
-      current_result <- CellChat_results[[sample_name]]
-
-      current_cellchat <- current_result$cellchat
-
-      data.frame(
-        sample = sample_name,
-        spots_analyzed = current_result$spots_analyzed,
-        number_of_groups = length(
-          levels(
-            current_cellchat@idents
-          )
-        ),
-        number_of_interactions = sum(
-          current_cellchat@net$count
-        ),
-        total_interaction_strength = sum(
-          current_cellchat@net$weight
-        ),
-        number_of_pathways = length(
-          current_cellchat@netP$pathways
-        ),
-        malignant_group_present =
-          malignant_label %in%
-          levels(current_cellchat@idents),
-        stringsAsFactors = FALSE
-      )
-    }
-  )
-)
-
-cat(
-  "\nCellChat summary:\n"
-)
-
-print(
-  cellchat_summary
-)
-
-utils::write.csv(
-  cellchat_summary,
-  summary_file,
-  row.names = FALSE
+cellchat_expression <- SeuratObject::LayerData(
+  spatial_cellchat,
+  assay = spatial_assay,
+  layer = "data"
 )
 
 
-#------------------------------------------------------------------------------
-# 18. Summarize malignant signaling across slides
-#------------------------------------------------------------------------------
-
-malignant_summary <- dplyr::bind_rows(
-  lapply(
-    names(CellChat_results),
-    function(sample_name) {
-      current_result <- CellChat_results[[sample_name]]
-
-      data.frame(
-        sample = sample_name,
-        malignant_outgoing = nrow(
-          current_result$malignant_outgoing
-        ),
-        malignant_incoming = nrow(
-          current_result$malignant_incoming
-        ),
-        malignant_total =
-          nrow(current_result$malignant_outgoing) +
-          nrow(current_result$malignant_incoming),
-        stringsAsFactors = FALSE
-      )
-    }
-  )
-)
-
-cat(
-  "\nMalignant-enriched signaling summary:\n"
-)
-
-print(
-  malignant_summary
-)
-
-utils::write.csv(
-  malignant_summary,
-  malignant_summary_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 19. Plot malignant signaling summary
-#------------------------------------------------------------------------------
-
-malignant_summary_long <- malignant_summary %>%
-  dplyr::select(
-    sample,
-    malignant_outgoing,
-    malignant_incoming
-  ) %>%
-  tidyr::pivot_longer(
-    cols = c(
-      malignant_outgoing,
-      malignant_incoming
-    ),
-    names_to = "direction",
-    values_to = "number_of_interactions"
-  ) %>%
-  dplyr::mutate(
-    direction = dplyr::recode(
-      direction,
-      malignant_outgoing = "Outgoing from malignant",
-      malignant_incoming = "Incoming to malignant"
-    )
-  )
-
-malignant_summary_plot <- ggplot2::ggplot(
-  malignant_summary_long,
-  ggplot2::aes(
-    x = sample,
-    y = number_of_interactions,
-    fill = direction
-  )
-) +
-  ggplot2::geom_col(
-    position = "dodge",
-    width = 0.7
-  ) +
-  ggplot2::labs(
-    title = "Malignant-enriched CellChat Interactions",
-    x = NULL,
-    y = "Number of inferred interactions",
-    fill = NULL
-  ) +
-  ggplot2::theme_classic(
-    base_size = 12
-  ) +
-  ggplot2::theme(
-    plot.title = ggplot2::element_text(
-      hjust = 0.5,
-      face = "bold"
-    ),
-    axis.text.x = ggplot2::element_text(
-      angle = 30,
-      hjust = 1
-    )
-  )
-
-malignant_summary_plot_file <- file.path(
-  figure_directory,
-  "spatial_CellChat_malignant_signaling_summary.png"
-)
-
-ggplot2::ggsave(
-  filename = malignant_summary_plot_file,
-  plot = malignant_summary_plot,
-  width = 9,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 20. Merge CellChat objects for cross-slide comparison
-#------------------------------------------------------------------------------
-
-cellchat_merged <- NULL
-
-interaction_number_comparison_file <- NULL
-
-interaction_strength_comparison_file <- NULL
-
-if (length(cellchat_object_list) > 1) {
-  cat(
-    "\n------------------------------------------------------------\n",
-    "Merging CellChat objects for cross-slide comparison\n",
-    "------------------------------------------------------------\n"
-  )
-
-  cellchat_merged <- CellChat::mergeCellChat(
-    cellchat_object_list,
-    add.names = names(
-      cellchat_object_list
-    )
-  )
-
-  saveRDS(
-    object = cellchat_merged,
-    file = merged_cellchat_file,
-    compress = TRUE
-  )
-
-  interaction_number_comparison_file <- file.path(
-    figure_directory,
-    "spatial_CellChat_compare_interaction_number.pdf"
-  )
-
-  grDevices::pdf(
-    interaction_number_comparison_file,
-    width = 8,
-    height = 6
-  )
-
-  print(
-    CellChat::compareInteractions(
-      cellchat_merged,
-      show.legend = FALSE,
-      group = seq_along(
-        cellchat_object_list
-      ),
-      measure = "count"
-    )
-  )
-
-  grDevices::dev.off()
-
-
-  interaction_strength_comparison_file <- file.path(
-    figure_directory,
-    "spatial_CellChat_compare_interaction_strength.pdf"
-  )
-
-  grDevices::pdf(
-    interaction_strength_comparison_file,
-    width = 8,
-    height = 6
-  )
-
-  print(
-    CellChat::compareInteractions(
-      cellchat_merged,
-      show.legend = FALSE,
-      group = seq_along(
-        cellchat_object_list
-      ),
-      measure = "weight"
-    )
-  )
-
-  grDevices::dev.off()
-}
-
-
-#==============================================================================
-# CROSS-SLIDE MALIGNANT SIGNALING ANALYSIS
-#==============================================================================
-
-
-#------------------------------------------------------------------------------
-# 21. Extract and clean communication tables
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "Cross-slide malignant signaling analysis\n",
-  "============================================================\n"
-)
-
-communication_tables <- list()
-
-for (sample_name in names(CellChat_results)) {
-  current_table <- CellChat_results[[sample_name]]$communication_table
-
-  current_table <- as.data.frame(
-    current_table,
-    stringsAsFactors = FALSE
-  )
-
-  if (nrow(current_table) == 0) {
-    warning(
-      "No significant CellChat interactions detected for ",
-      sample_name
-    )
-
-    next
-  }
-
-  character_columns <- intersect(
-    c(
-      "source",
-      "target",
-      "ligand",
-      "receptor",
-      "interaction_name",
-      "interaction_name_2",
-      "pathway_name",
-      "annotation",
-      "evidence"
-    ),
-    colnames(current_table)
-  )
-
-  for (current_column in character_columns) {
-    current_table[[current_column]] <- as.character(
-      unlist(
-        current_table[[current_column]],
-        use.names = FALSE
-      )
-    )
-  }
-
-  if ("prob" %in% colnames(current_table)) {
-    current_table$prob <- as.numeric(
-      unlist(
-        current_table$prob,
-        use.names = FALSE
-      )
-    )
-  }
-
-  current_table$sample <- sample_name
-
-  current_table$interaction_key <- paste(
-    current_table$source,
-    current_table$target,
-    current_table$ligand,
-    current_table$receptor,
-    sep = " | "
-  )
-
-  current_table$lr_key <- paste(
-    current_table$ligand,
-    current_table$receptor,
-    sep = " -> "
-  )
-
-  communication_tables[[sample_name]] <- current_table
-}
-
-if (length(communication_tables) == 0) {
-  stop(
-    "No CellChat communication tables were successfully extracted."
-  )
-}
-
-all_interactions <- dplyr::bind_rows(
-  communication_tables
-)
-
-all_interactions_file <- file.path(
-  cross_slide_results_directory,
-  "all_CellChat_interactions_cleaned.csv"
-)
-
-utils::write.csv(
-  all_interactions,
-  all_interactions_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 22. Extract malignant-associated interactions
-#------------------------------------------------------------------------------
-
-tumor_interactions <- all_interactions[
-  all_interactions$sample %in% tumor_samples,
+cellchat_metadata <- spatial_cellchat@meta.data[
+  colnames(cellchat_expression),
   ,
   drop = FALSE
 ]
 
-malignant_interactions <- tumor_interactions[
-  tumor_interactions$source == malignant_label |
-  tumor_interactions$target == malignant_label,
-  ,
-  drop = FALSE
-]
 
-malignant_outgoing <- malignant_interactions[
-  malignant_interactions$source == malignant_label,
-  ,
-  drop = FALSE
-]
+#------------------------------------------------------------------------------
+# 7. Run CellChat
+#------------------------------------------------------------------------------
 
-malignant_incoming <- malignant_interactions[
-  malignant_interactions$target == malignant_label,
-  ,
-  drop = FALSE
-]
-
-cat(
-  "\nMalignant-associated interactions by sample:\n"
+cellchat <- CellChat::createCellChat(
+  object = cellchat_expression,
+  meta = cellchat_metadata,
+  group.by = cellchat_group_column
 )
 
-print(
-  table(
-    malignant_interactions$sample,
-    useNA = "ifany"
-  )
+
+cellchat@DB <- CellChat::CellChatDB.mouse
+
+
+cellchat <- CellChat::subsetData(
+  cellchat
 )
 
-all_malignant_file <- file.path(
-  cross_slide_results_directory,
-  "all_malignant_associated_interactions.csv"
+
+cellchat <- CellChat::identifyOverExpressedGenes(
+  cellchat
 )
 
-all_malignant_outgoing_file <- file.path(
-  cross_slide_results_directory,
-  "all_malignant_outgoing_interactions.csv"
+
+cellchat <- CellChat::identifyOverExpressedInteractions(
+  cellchat
 )
 
-all_malignant_incoming_file <- file.path(
-  cross_slide_results_directory,
-  "all_malignant_incoming_interactions.csv"
+
+cellchat <- CellChat::computeCommunProb(
+  object = cellchat,
+  type = communication_mean_type,
+  trim = communication_trim,
+  raw.use = TRUE,
+  population.size = FALSE,
+  distance.use = FALSE,
+  seed.use = 1234
 )
 
-utils::write.csv(
-  malignant_interactions,
-  all_malignant_file,
-  row.names = FALSE
+
+cellchat <- CellChat::filterCommunication(
+  cellchat,
+  min.cells = minimum_spots_per_group
 )
 
-utils::write.csv(
-  malignant_outgoing,
-  all_malignant_outgoing_file,
-  row.names = FALSE
+
+cellchat <- CellChat::computeCommunProbPathway(
+  cellchat
 )
 
-utils::write.csv(
-  malignant_incoming,
-  all_malignant_incoming_file,
-  row.names = FALSE
+
+cellchat <- CellChat::aggregateNet(
+  cellchat
+)
+
+
+cellchat <- CellChat::netAnalysis_computeCentrality(
+  cellchat,
+  slot.name = "netP"
+)
+
+
+message(
+  "CellChat inference complete."
 )
 
 
 #------------------------------------------------------------------------------
-# 23. Identify malignant interactions unique to each tumor slide
+# 8. Export interaction results
 #------------------------------------------------------------------------------
 
-vehicle1_keys <- unique(
-  malignant_interactions$interaction_key[
-    malignant_interactions$sample == "Vehicle_1"
-  ]
+cellchat_interactions <- CellChat::subsetCommunication(
+  cellchat
 )
 
-vehicle2_keys <- unique(
-  malignant_interactions$interaction_key[
-    malignant_interactions$sample == "Vehicle_2"
-  ]
-)
 
-niacin_keys <- unique(
-  malignant_interactions$interaction_key[
-    malignant_interactions$sample == "Niacin_Treatment"
-  ]
-)
-
-vehicle1_unique_keys <- setdiff(
-  vehicle1_keys,
-  union(
-    vehicle2_keys,
-    niacin_keys
-  )
-)
-
-vehicle2_unique_keys <- setdiff(
-  vehicle2_keys,
-  union(
-    vehicle1_keys,
-    niacin_keys
-  )
-)
-
-niacin_unique_keys <- setdiff(
-  niacin_keys,
-  union(
-    vehicle1_keys,
-    vehicle2_keys
-  )
-)
-
-vehicle1_unique <- malignant_interactions[
-  malignant_interactions$sample == "Vehicle_1" &
-  malignant_interactions$interaction_key %in%
-    vehicle1_unique_keys,
-  ,
-  drop = FALSE
-]
-
-vehicle2_unique <- malignant_interactions[
-  malignant_interactions$sample == "Vehicle_2" &
-  malignant_interactions$interaction_key %in%
-    vehicle2_unique_keys,
-  ,
-  drop = FALSE
-]
-
-niacin_unique <- malignant_interactions[
-  malignant_interactions$sample == "Niacin_Treatment" &
-  malignant_interactions$interaction_key %in%
-    niacin_unique_keys,
-  ,
-  drop = FALSE
-]
-
-vehicle1_unique <- vehicle1_unique[
-  order(
-    vehicle1_unique$prob,
-    decreasing = TRUE
+write.csv(
+  cellchat_interactions,
+  file.path(
+    results_directory,
+    "spatial_CellChat_interactions.csv"
   ),
-  ,
-  drop = FALSE
-]
-
-vehicle2_unique <- vehicle2_unique[
-  order(
-    vehicle2_unique$prob,
-    decreasing = TRUE
-  ),
-  ,
-  drop = FALSE
-]
-
-niacin_unique <- niacin_unique[
-  order(
-    niacin_unique$prob,
-    decreasing = TRUE
-  ),
-  ,
-  drop = FALSE
-]
-
-vehicle1_unique_file <- file.path(
-  cross_slide_results_directory,
-  "Vehicle_1_unique_malignant_interactions.csv"
-)
-
-vehicle2_unique_file <- file.path(
-  cross_slide_results_directory,
-  "Vehicle_2_unique_malignant_interactions.csv"
-)
-
-niacin_unique_file <- file.path(
-  cross_slide_results_directory,
-  "Niacin_unique_malignant_interactions.csv"
-)
-
-utils::write.csv(
-  vehicle1_unique,
-  vehicle1_unique_file,
   row.names = FALSE
 )
 
-utils::write.csv(
-  vehicle2_unique,
-  vehicle2_unique_file,
-  row.names = FALSE
-)
 
-utils::write.csv(
-  niacin_unique,
-  niacin_unique_file,
-  row.names = FALSE
-)
-
-cat(
-  "\nUnique malignant-associated interactions:\n",
-  "  Vehicle 1: ", nrow(vehicle1_unique), "\n",
-  "  Vehicle 2: ", nrow(vehicle2_unique), "\n",
-  "  Niacin:    ", nrow(niacin_unique), "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 24. Compare Niacin malignant signals with mean vehicle signal
-#------------------------------------------------------------------------------
-
-required_probability_columns <- c(
-  "sample",
-  "interaction_key",
-  "source",
-  "target",
-  "ligand",
-  "receptor",
-  "pathway_name",
-  "prob"
-)
-
-missing_probability_columns <- setdiff(
-  required_probability_columns,
-  colnames(malignant_interactions)
-)
-
-if (length(missing_probability_columns) > 0) {
-  stop(
-    "Required CellChat interaction column(s) missing:\n",
-    paste(
-      missing_probability_columns,
-      collapse = ", "
-    )
-  )
-}
-
-malignant_probability_table <- malignant_interactions %>%
-  dplyr::select(
-    dplyr::all_of(
-      required_probability_columns
-    )
-  ) %>%
+interaction_summary <- cellchat_interactions %>%
   dplyr::group_by(
-    sample,
-    interaction_key,
     source,
-    target,
-    ligand,
-    receptor,
-    pathway_name
-  ) %>%
-  dplyr::summarise(
-    prob = max(
-      prob,
-      na.rm = TRUE
-    ),
-    .groups = "drop"
-  )
-
-interaction_metadata <- malignant_probability_table %>%
-  dplyr::select(
-    interaction_key,
-    source,
-    target,
-    ligand,
-    receptor,
-    pathway_name
-  ) %>%
-  dplyr::distinct()
-
-malignant_probability_wide <- malignant_probability_table %>%
-  dplyr::select(
-    sample,
-    interaction_key,
-    prob
-  ) %>%
-  tidyr::pivot_wider(
-    names_from = sample,
-    values_from = prob,
-    values_fill = 0
-  )
-
-for (sample_name in tumor_samples) {
-  if (!sample_name %in%
-      colnames(malignant_probability_wide)) {
-    malignant_probability_wide[[sample_name]] <- 0
-  }
-}
-
-niacin_vs_vehicle <- malignant_probability_wide %>%
-  dplyr::mutate(
-    Vehicle_mean =
-      (Vehicle_1 + Vehicle_2) / 2,
-
-    Niacin_minus_vehicle =
-      Niacin_Treatment - Vehicle_mean,
-
-    Niacin_fold_vs_vehicle =
-      (Niacin_Treatment + 1e-10) /
-      (Vehicle_mean + 1e-10)
-  ) %>%
-  dplyr::left_join(
-    interaction_metadata,
-    by = "interaction_key"
-  )
-
-niacin_enriched <- niacin_vs_vehicle %>%
-  dplyr::filter(
-    Niacin_Treatment > 0,
-    Niacin_fold_vs_vehicle >= niacin_fold_threshold,
-    Niacin_minus_vehicle > 0
-  ) %>%
-  dplyr::arrange(
-    dplyr::desc(
-      Niacin_minus_vehicle
-    )
-  )
-
-niacin_vs_vehicle_file <- file.path(
-  cross_slide_results_directory,
-  "Niacin_vs_vehicle_all_malignant_interactions.csv"
-)
-
-niacin_enriched_file <- file.path(
-  cross_slide_results_directory,
-  "Niacin_enriched_malignant_interactions.csv"
-)
-
-utils::write.csv(
-  niacin_vs_vehicle,
-  niacin_vs_vehicle_file,
-  row.names = FALSE
-)
-
-utils::write.csv(
-  niacin_enriched,
-  niacin_enriched_file,
-  row.names = FALSE
-)
-
-cat(
-  "\nNiacin-enriched malignant interactions: ",
-  nrow(niacin_enriched),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 25. Rank TME populations receiving malignant signals
-#------------------------------------------------------------------------------
-
-malignant_target_summary <- malignant_outgoing %>%
-  dplyr::group_by(
-    sample,
     target
   ) %>%
   dplyr::summarise(
-    n_interactions = dplyr::n(),
-    total_probability = sum(
-      prob,
-      na.rm = TRUE
-    ),
-    mean_probability = mean(
+    interaction_number = dplyr::n(),
+    interaction_strength = sum(
       prob,
       na.rm = TRUE
     ),
     .groups = "drop"
   )
 
-malignant_target_summary_file <- file.path(
-  cross_slide_results_directory,
-  "malignant_outgoing_TME_target_summary.csv"
-)
 
-utils::write.csv(
-  malignant_target_summary,
-  malignant_target_summary_file,
+write.csv(
+  interaction_summary,
+  file.path(
+    results_directory,
+    "spatial_CellChat_sender_receiver_summary.csv"
+  ),
   row.names = FALSE
 )
 
-malignant_target_plot <- ggplot2::ggplot(
-  malignant_target_summary,
-  ggplot2::aes(
-    x = reorder(
-      target,
-      total_probability
-    ),
-    y = total_probability,
-    fill = sample
-  )
-) +
-  ggplot2::geom_col(
-    position = "dodge"
-  ) +
-  ggplot2::coord_flip() +
-  ggplot2::labs(
-    title = "TME Targets of Malignant-Enriched Signaling",
-    x = NULL,
-    y = "Total inferred interaction probability",
-    fill = "Sample"
-  ) +
-  ggplot2::theme_classic(
-    base_size = 12
-  )
 
-malignant_target_plot_file <- file.path(
-  cross_slide_figure_directory,
-  "malignant_outgoing_TME_targets.png"
+#------------------------------------------------------------------------------
+# 9. Rank signaling pathways
+#------------------------------------------------------------------------------
+
+pathway_information_flow <- apply(
+  cellchat@netP$prob,
+  3,
+  sum,
+  na.rm = TRUE
 )
 
-ggplot2::ggsave(
-  filename = malignant_target_plot_file,
-  plot = malignant_target_plot,
-  width = 10,
+
+pathway_summary <- data.frame(
+  pathway = names(pathway_information_flow),
+  information_flow = as.numeric(pathway_information_flow),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::filter(
+    information_flow > 0
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(information_flow)
+  )
+
+
+top_pathway_summary <- pathway_summary %>%
+  dplyr::slice_head(
+    n = top_n_pathways
+  )
+
+
+top_pathways <- top_pathway_summary$pathway
+
+
+write.csv(
+  pathway_summary,
+  file.path(
+    results_directory,
+    "spatial_CellChat_pathway_information_flow.csv"
+  ),
+  row.names = FALSE
+)
+
+
+write.csv(
+  top_pathway_summary,
+  file.path(
+    results_directory,
+    "spatial_CellChat_top_pathways.csv"
+  ),
+  row.names = FALSE
+)
+
+
+print(
+  top_pathway_summary
+)
+
+
+#------------------------------------------------------------------------------
+# 10. Global signaling networks
+#------------------------------------------------------------------------------
+
+group_sizes <- as.numeric(
+  table(cellchat@idents)
+)
+
+
+#------------------------------------------------------------------------------
+# 10A. Number of interactions
+#------------------------------------------------------------------------------
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_interaction_number_circle.png"
+  ),
+  width = 3000,
+  height = 3000,
+  res = 300
+)
+
+CellChat::netVisual_circle(
+  cellchat@net$count,
+  vertex.weight = group_sizes,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Number of interactions"
+)
+
+dev.off()
+
+
+CellChat::netVisual_circle(
+  cellchat@net$count,
+  vertex.weight = group_sizes,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Number of interactions"
+)
+
+
+#------------------------------------------------------------------------------
+# 10B. Interaction strength
+#------------------------------------------------------------------------------
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_interaction_strength_circle.png"
+  ),
+  width = 3000,
+  height = 3000,
+  res = 300
+)
+
+CellChat::netVisual_circle(
+  cellchat@net$weight,
+  vertex.weight = group_sizes,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Interaction strength"
+)
+
+dev.off()
+
+
+CellChat::netVisual_circle(
+  cellchat@net$weight,
+  vertex.weight = group_sizes,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Interaction strength"
+)
+
+
+#------------------------------------------------------------------------------
+# 10C. Number of interactions heatmap
+#------------------------------------------------------------------------------
+
+interaction_count_heatmap <- CellChat::netVisual_heatmap(
+  cellchat,
+  measure = "count",
+  color.heatmap = "Reds"
+)
+
+
+ComplexHeatmap::draw(
+  interaction_count_heatmap
+)
+
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_interaction_number_heatmap.png"
+  ),
+  width = 3000,
+  height = 2600,
+  res = 300
+)
+
+ComplexHeatmap::draw(
+  interaction_count_heatmap
+)
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 10D. Interaction strength heatmap
+#------------------------------------------------------------------------------
+
+interaction_strength_heatmap <- CellChat::netVisual_heatmap(
+  cellchat,
+  measure = "weight",
+  color.heatmap = "Reds"
+)
+
+
+ComplexHeatmap::draw(
+  interaction_strength_heatmap
+)
+
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_interaction_strength_heatmap.png"
+  ),
+  width = 3000,
+  height = 2600,
+  res = 300
+)
+
+ComplexHeatmap::draw(
+  interaction_strength_heatmap
+)
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 10E. Signaling-role scatter
+#------------------------------------------------------------------------------
+
+signaling_role_scatter <- CellChat::netAnalysis_signalingRole_scatter(
+  cellchat
+)
+
+
+print(
+  signaling_role_scatter
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_signaling_role_scatter.png"
+  ),
+  signaling_role_scatter,
+  width = 9,
   height = 8,
   dpi = 600
 )
 
 
 #------------------------------------------------------------------------------
-# 26. Summarize malignant-associated signaling pathways
+# 11. Global pathway signaling
 #------------------------------------------------------------------------------
 
-malignant_pathway_summary <- data.frame()
+# All detected pathways are retained in the CellChat object and result tables.
+# Only the strongest pathways are displayed to keep figures readable.
 
-niacin_unique_pathways <- data.frame()
 
-malignant_pathway_summary_file <- NULL
+#------------------------------------------------------------------------------
+# 11A. Top pathway information flow
+#------------------------------------------------------------------------------
 
-niacin_unique_pathway_file <- NULL
-
-malignant_pathway_plot_file <- NULL
-
-if ("pathway_name" %in%
-    colnames(malignant_interactions)) {
-
-  malignant_pathway_summary <- malignant_interactions %>%
-    dplyr::filter(
-      !is.na(pathway_name),
-      pathway_name != ""
-    ) %>%
-    dplyr::group_by(
-      sample,
-      pathway_name
-    ) %>%
-    dplyr::summarise(
-      n_interactions = dplyr::n(),
-      total_probability = sum(
-        prob,
-        na.rm = TRUE
-      ),
-      .groups = "drop"
-    )
-
-  malignant_pathway_summary_file <- file.path(
-    cross_slide_results_directory,
-    "malignant_pathway_summary.csv"
-  )
-
-  utils::write.csv(
-    malignant_pathway_summary,
-    malignant_pathway_summary_file,
-    row.names = FALSE
-  )
-
-  vehicle1_pathways <- unique(
-    malignant_pathway_summary$pathway_name[
-      malignant_pathway_summary$sample ==
-        "Vehicle_1"
-    ]
-  )
-
-  vehicle2_pathways <- unique(
-    malignant_pathway_summary$pathway_name[
-      malignant_pathway_summary$sample ==
-        "Vehicle_2"
-    ]
-  )
-
-  niacin_pathways <- malignant_pathway_summary %>%
-    dplyr::filter(
-      sample == "Niacin_Treatment"
-    ) %>%
-    dplyr::arrange(
-      dplyr::desc(
-        total_probability
-      )
-    )
-
-  niacin_pathway_names <- unique(
-    niacin_pathways$pathway_name
-  )
-
-  niacin_unique_pathway_names <- setdiff(
-    niacin_pathway_names,
-    union(
-      vehicle1_pathways,
-      vehicle2_pathways
+top_pathway_plot_data <- top_pathway_summary %>%
+  dplyr::mutate(
+    pathway = factor(
+      pathway,
+      levels = rev(pathway)
     )
   )
 
-  niacin_unique_pathways <- niacin_pathways %>%
-    dplyr::filter(
-      pathway_name %in%
-        niacin_unique_pathway_names
-    )
 
-  niacin_unique_pathway_file <- file.path(
-    cross_slide_results_directory,
-    "Niacin_unique_malignant_pathways.csv"
+pathway_information_plot <- ggplot(
+  top_pathway_plot_data,
+  aes(
+    x = information_flow,
+    y = pathway
   )
-
-  utils::write.csv(
-    niacin_unique_pathways,
-    niacin_unique_pathway_file,
-    row.names = FALSE
-  )
-
-  top_pathways <- malignant_pathway_summary %>%
-    dplyr::group_by(
-      pathway_name
-    ) %>%
-    dplyr::summarise(
-      total = sum(
-        total_probability,
-        na.rm = TRUE
-      ),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(
-      dplyr::desc(total)
-    ) %>%
-    dplyr::slice_head(
-      n = 15
-    ) %>%
-    dplyr::pull(
-      pathway_name
-    )
-
-  malignant_pathway_plot_data <-
-    malignant_pathway_summary %>%
-    dplyr::filter(
-      pathway_name %in%
-        top_pathways
-    )
-
-  malignant_pathway_plot <- ggplot2::ggplot(
-    malignant_pathway_plot_data,
-    ggplot2::aes(
-      x = pathway_name,
-      y = total_probability,
-      fill = sample
-    )
+) +
+  geom_col() +
+  labs(
+    title = "Top signaling pathways",
+    x = "Global information flow",
+    y = NULL
   ) +
-    ggplot2::geom_col(
-      position = "dodge"
-    ) +
-    ggplot2::coord_flip() +
-    ggplot2::labs(
-      title = "Malignant-Associated Signaling Pathways",
-      x = NULL,
-      y = "Total inferred interaction probability",
-      fill = "Sample"
-    ) +
-    ggplot2::theme_classic(
-      base_size = 12
-    )
-
-  malignant_pathway_plot_file <- file.path(
-    cross_slide_figure_directory,
-    "malignant_pathways_cross_slide.png"
-  )
-
-  ggplot2::ggsave(
-    filename = malignant_pathway_plot_file,
-    plot = malignant_pathway_plot,
-    width = 11,
-    height = 8,
-    dpi = 600
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 27. Extract Niacin-specific malignant outgoing and incoming interactions
-#------------------------------------------------------------------------------
-
-niacin_specific_outgoing <- niacin_unique[
-  niacin_unique$source == malignant_label,
-  ,
-  drop = FALSE
-]
-
-niacin_specific_incoming <- niacin_unique[
-  niacin_unique$target == malignant_label,
-  ,
-  drop = FALSE
-]
-
-niacin_specific_outgoing <- niacin_specific_outgoing[
-  order(
-    niacin_specific_outgoing$prob,
-    decreasing = TRUE
-  ),
-  ,
-  drop = FALSE
-]
-
-niacin_specific_incoming <- niacin_specific_incoming[
-  order(
-    niacin_specific_incoming$prob,
-    decreasing = TRUE
-  ),
-  ,
-  drop = FALSE
-]
-
-niacin_specific_outgoing_file <- file.path(
-  cross_slide_results_directory,
-  "Niacin_unique_malignant_OUTGOING.csv"
-)
-
-niacin_specific_incoming_file <- file.path(
-  cross_slide_results_directory,
-  "Niacin_unique_malignant_INCOMING.csv"
-)
-
-utils::write.csv(
-  niacin_specific_outgoing,
-  niacin_specific_outgoing_file,
-  row.names = FALSE
-)
-
-utils::write.csv(
-  niacin_specific_incoming,
-  niacin_specific_incoming_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 28. Identify globally unique Niacin interactions
-#------------------------------------------------------------------------------
-
-niacin_global_unique <- data.frame()
-
-niacin_global_unique_file <- NULL
-
-if (
-  "Normal_Tissue" %in% names(communication_tables) &&
-  "Vehicle_1" %in% names(communication_tables) &&
-  "Vehicle_2" %in% names(communication_tables) &&
-  "Niacin_Treatment" %in% names(communication_tables)
-) {
-
-  niacin_global_keys <- unique(
-    communication_tables[["Niacin_Treatment"]]$interaction_key
-  )
-
-  comparison_global_keys <- unique(
-    c(
-      communication_tables[["Vehicle_1"]]$interaction_key,
-      communication_tables[["Vehicle_2"]]$interaction_key,
-      communication_tables[["Normal_Tissue"]]$interaction_key
-    )
-  )
-
-  niacin_global_unique_keys <- setdiff(
-    niacin_global_keys,
-    comparison_global_keys
-  )
-
-  niacin_global_unique <-
-    communication_tables[["Niacin_Treatment"]][
-      communication_tables[["Niacin_Treatment"]]$interaction_key %in%
-      niacin_global_unique_keys,
-      ,
-      drop = FALSE
-    ]
-
-  niacin_global_unique <- niacin_global_unique[
-    order(
-      niacin_global_unique$prob,
-      decreasing = TRUE
-    ),
-    ,
-    drop = FALSE
-  ]
-
-  niacin_global_unique_file <- file.path(
-    cross_slide_results_directory,
-    "Niacin_unique_vs_vehicle_and_normal_all_interactions.csv"
-  )
-
-  utils::write.csv(
-    niacin_global_unique,
-    niacin_global_unique_file,
-    row.names = FALSE
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 29. Plot top Niacin-enriched malignant interactions
-#------------------------------------------------------------------------------
-
-niacin_enriched_plot_file <- NULL
-
-top_niacin_enriched <- niacin_enriched %>%
-  dplyr::slice_head(
-    n = 20
-  )
-
-if (nrow(top_niacin_enriched) > 0) {
-  top_niacin_enriched$interaction_label <- paste0(
-    top_niacin_enriched$ligand,
-    " -> ",
-    top_niacin_enriched$receptor,
-    "\n",
-    top_niacin_enriched$source,
-    " -> ",
-    top_niacin_enriched$target
-  )
-
-  niacin_enriched_plot <- ggplot2::ggplot(
-    top_niacin_enriched,
-    ggplot2::aes(
-      x = reorder(
-        interaction_label,
-        Niacin_fold_vs_vehicle
-      ),
-      y = Niacin_fold_vs_vehicle
-    )
+  theme_classic(
+    base_size = 12
   ) +
-    ggplot2::geom_col() +
-    ggplot2::coord_flip() +
-    ggplot2::geom_hline(
-      yintercept = niacin_fold_threshold,
-      linetype = "dashed"
-    ) +
-    ggplot2::labs(
-      title = "Niacin-Enriched Malignant-Associated Interactions",
-      subtitle =
-        "Relative to mean Vehicle 1 / Vehicle 2 CellChat probability",
-      x = NULL,
-      y = "Niacin / mean vehicle interaction probability"
-    ) +
-    ggplot2::theme_classic(
-      base_size = 12
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
     )
-
-  niacin_enriched_plot_file <- file.path(
-    cross_slide_figure_directory,
-    "Niacin_enriched_malignant_interactions.png"
   )
 
-  ggplot2::ggsave(
-    filename = niacin_enriched_plot_file,
-    plot = niacin_enriched_plot,
-    width = 11,
-    height = 9,
-    dpi = 600
-  )
-}
+
+print(
+  pathway_information_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_top_pathway_information_flow.png"
+  ),
+  pathway_information_plot,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
 
 
 #------------------------------------------------------------------------------
-# 30. Save CellChat identity into master spatial object
+# 11B. Outgoing signaling heatmap
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Saving CellChat identity into master spatial object\n",
-  "------------------------------------------------------------\n"
+outgoing_heatmap <- CellChat::netAnalysis_signalingRole_heatmap(
+  cellchat,
+  pattern = "outgoing",
+  signaling = top_pathways,
+  title = "Outgoing signaling"
 )
 
-saveRDS(
-  object = spatial_cellchat,
-  file = updated_spatial_file,
-  compress = TRUE
+
+ComplexHeatmap::draw(
+  outgoing_heatmap
 )
 
-if (!file.exists(updated_spatial_file)) {
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_top_pathways_outgoing_heatmap.png"
+  ),
+  width = 3200,
+  height = 2800,
+  res = 300
+)
+
+ComplexHeatmap::draw(
+  outgoing_heatmap
+)
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 11C. Incoming signaling heatmap
+#------------------------------------------------------------------------------
+
+incoming_heatmap <- CellChat::netAnalysis_signalingRole_heatmap(
+  cellchat,
+  pattern = "incoming",
+  signaling = top_pathways,
+  title = "Incoming signaling"
+)
+
+
+ComplexHeatmap::draw(
+  incoming_heatmap
+)
+
+
+png(
+  file.path(
+    figure_directory,
+    "spatial_CellChat_top_pathways_incoming_heatmap.png"
+  ),
+  width = 3200,
+  height = 2800,
+  res = 300
+)
+
+ComplexHeatmap::draw(
+  incoming_heatmap
+)
+
+dev.off()
+
+#------------------------------------------------------------------------------
+# 12. Representative PTN signaling pathway
+#------------------------------------------------------------------------------
+
+# Examine PTN signaling as a representative pathway from the spatial CellChat
+# analysis.
+#
+# Outputs:
+#   - PTN cell-identity chord diagram
+#   - PTN ligand-receptor contribution plot
+#   - PTN source-target interaction table
+#
+# Important:
+#   Spatial CellChat identities represent predominant transcriptional
+#   identities of Visium spots rather than purified individual cell types.
+#   These results therefore represent inferred signaling relationships between
+#   spatial transcriptional populations.
+
+
+#------------------------------------------------------------------------------
+# 12A. Confirm PTN pathway is present
+#------------------------------------------------------------------------------
+
+representative_pathway <- "PTN"
+
+
+if (!representative_pathway %in% cellchat@netP$pathways) {
+
   stop(
-    "Updated CellChat-annotated spatial object was not saved."
+    "PTN signaling pathway was not detected in the spatial CellChat analysis."
   )
 }
 
 
+message(
+  "Analyzing representative CellChat pathway: ",
+  representative_pathway
+)
+
+
 #------------------------------------------------------------------------------
-# 31. Save analysis parameters
+# 12B. Export PTN pathway interactions
+#------------------------------------------------------------------------------
+
+ptn_interactions <- CellChat::subsetCommunication(
+  cellchat,
+  signaling = representative_pathway
+)
+
+
+print(
+  ptn_interactions
+)
+
+
+write.csv(
+  ptn_interactions,
+  file.path(
+    results_directory,
+    "spatial_CellChat_PTN_interactions.csv"
+  ),
+  row.names = FALSE
+)
+
+
+message(
+  "PTN pathway contains ",
+  nrow(ptn_interactions),
+  " inferred source-target interactions."
+)
+
+
+#------------------------------------------------------------------------------
+# 12C. PTN signaling chord diagram
+#------------------------------------------------------------------------------
+
+# The chord diagram summarizes inferred PTN communication between spatial
+# CellChat identities. Ribbon width represents relative communication strength.
+
+png(
+  filename = file.path(
+    figure_directory,
+    "spatial_CellChat_PTN_signaling_chord.png"
+  ),
+  width = 3200,
+  height = 3200,
+  res = 400
+)
+
+
+CellChat::netVisual_chord_cell(
+  cellchat,
+  signaling = representative_pathway,
+  title.name = "PTN signaling pathway network"
+)
+
+
+dev.off()
+
+
+message(
+  "Saved PTN signaling chord diagram."
+)
+
+
+#------------------------------------------------------------------------------
+# 12D. PTN ligand-receptor contribution
+#------------------------------------------------------------------------------
+
+# Quantify the relative contribution of individual ligand-receptor
+# interactions to the inferred PTN pathway.
+
+ptn_contribution_plot <- CellChat::netAnalysis_contribution(
+  cellchat,
+  signaling = representative_pathway
+)
+
+
+print(
+  ptn_contribution_plot
+)
+
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "spatial_CellChat_PTN_ligand_receptor_contribution.png"
+  ),
+  plot = ptn_contribution_plot,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+
+message(
+  "Saved PTN ligand-receptor contribution plot."
+)
+
+
+#------------------------------------------------------------------------------
+# 12E. Summarize PTN sender-receiver communication
+#------------------------------------------------------------------------------
+
+# Aggregate PTN communication probabilities across ligand-receptor pairs to
+# identify the strongest source-target relationships.
+
+ptn_sender_receiver_summary <- ptn_interactions %>%
+  dplyr::group_by(
+    source,
+    target
+  ) %>%
+  dplyr::summarise(
+    n_interactions = dplyr::n(),
+    communication_strength = sum(
+      prob,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(communication_strength)
+  )
+
+
+print(
+  ptn_sender_receiver_summary
+)
+
+
+write.csv(
+  ptn_sender_receiver_summary,
+  file.path(
+    results_directory,
+    "spatial_CellChat_PTN_sender_receiver_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 12F. Report strongest inferred PTN relationships
+#------------------------------------------------------------------------------
+
+message(
+  "Top inferred PTN source-target relationships:"
+)
+
+
+print(
+  ptn_sender_receiver_summary %>%
+    dplyr::slice_head(
+      n = 10
+    )
+)
+
+
+#------------------------------------------------------------------------------
+# 13. Save analysis parameters and CellChat object
 #------------------------------------------------------------------------------
 
 cellchat_parameters <- data.frame(
+
   parameter = c(
-    "cellchat_assay",
-    "sample_column",
-    "SingleR_column",
-    "malignancy_column",
-    "CellChat_group_column",
+    "spatial_assay",
+    "SingleR_identity",
+    "malignancy_annotation",
     "malignant_label",
-    "database",
-    "communication_method",
     "minimum_spots_per_group",
-    "raw_use",
-    "normalization_method",
+    "maximum_spots_per_identity",
+    "random_seed",
+    "normalization",
     "normalization_scale_factor",
-    "niacin_fold_threshold"
+    "communication_mean",
+    "trim",
+    "raw_use",
+    "population_size",
+    "distance_use",
+    "top_pathways_displayed"
   ),
+
   value = c(
-    cellchat_assay,
-    sample_column,
+    spatial_assay,
     singleR_column,
     malignancy_column,
-    cellchat_group_column,
     malignant_label,
-    "CellChatDB.mouse",
-    communication_method,
     minimum_spots_per_group,
-    TRUE,
+    max_spots_per_identity,
+    1234,
     "LogNormalize",
-    normalization_scale_factor,
-    niacin_fold_threshold
+    10000,
+    communication_mean_type,
+    communication_trim,
+    TRUE,
+    FALSE,
+    FALSE,
+    top_n_pathways
   ),
+
   stringsAsFactors = FALSE
 )
 
-utils::write.csv(
+
+write.csv(
   cellchat_parameters,
-  parameter_file,
+  file.path(
+    results_directory,
+    "spatial_CellChat_parameters.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 32. Validate expected Module 13 outputs
-#------------------------------------------------------------------------------
-
-expected_object_files <- c(
-  all_cellchat_file,
-  updated_spatial_file,
-  vapply(
-    CellChat_results,
-    function(x) x$object_file,
-    character(1)
-  )
-)
-
-if (!is.null(cellchat_merged)) {
-  expected_object_files <- c(
-    expected_object_files,
-    merged_cellchat_file
-  )
-}
-
-
-expected_result_files <- c(
-  identity_table_file,
-  summary_file,
-  malignant_summary_file,
-  parameter_file,
-  all_interactions_file,
-  all_malignant_file,
-  all_malignant_outgoing_file,
-  all_malignant_incoming_file,
-  vehicle1_unique_file,
-  vehicle2_unique_file,
-  niacin_unique_file,
-  niacin_vs_vehicle_file,
-  niacin_enriched_file,
-  malignant_target_summary_file,
-  niacin_specific_outgoing_file,
-  niacin_specific_incoming_file
-)
-
-per_sample_result_files <- unlist(
-  lapply(
-    CellChat_results,
-    function(x) {
-      c(
-        x$interaction_file,
-        x$pathway_file,
-        x$cell_count_file,
-        x$malignant_interaction_file,
-        x$malignant_outgoing_file,
-        x$malignant_incoming_file
-      )
-    }
-  ),
-  use.names = FALSE
-)
-
-per_sample_result_files <- per_sample_result_files[
-  !is.na(per_sample_result_files) &
-  per_sample_result_files != ""
-]
-
-expected_result_files <- c(
-  expected_result_files,
-  per_sample_result_files
-)
-
-if (!is.null(malignant_pathway_summary_file)) {
-  expected_result_files <- c(
-    expected_result_files,
-    malignant_pathway_summary_file,
-    niacin_unique_pathway_file
-  )
-}
-
-if (!is.null(niacin_global_unique_file)) {
-  expected_result_files <- c(
-    expected_result_files,
-    niacin_global_unique_file
-  )
-}
-
-
-expected_figure_files <- c(
-  cellchat_spatial_files,
-  combined_identity_file,
-  malignant_summary_plot_file,
-  malignant_target_plot_file
-)
-
-per_sample_figure_files <- unlist(
-  lapply(
-    CellChat_results,
-    function(x) {
-      c(
-        x$interaction_number_file,
-        x$interaction_strength_file,
-        x$outgoing_heatmap_file,
-        x$incoming_heatmap_file,
-        x$malignant_outgoing_bubble_file,
-        x$malignant_incoming_bubble_file
-      )
-    }
-  ),
-  use.names = FALSE
-)
-
-per_sample_figure_files <- per_sample_figure_files[
-  !is.na(per_sample_figure_files) &
-  per_sample_figure_files != ""
-]
-
-expected_figure_files <- c(
-  expected_figure_files,
-  per_sample_figure_files
-)
-
-if (!is.null(interaction_number_comparison_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    interaction_number_comparison_file,
-    interaction_strength_comparison_file
-  )
-}
-
-if (!is.null(malignant_pathway_plot_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    malignant_pathway_plot_file
-  )
-}
-
-if (!is.null(niacin_enriched_plot_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    niacin_enriched_plot_file
-  )
-}
-
-
-missing_object_files <- expected_object_files[
-  !file.exists(expected_object_files)
-]
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-
-if (length(missing_object_files) > 0) {
-  stop(
-    "One or more expected Module 13 object files were not created:\n",
-    paste(
-      missing_object_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 13 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 13 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 13 outputs were created successfully.\n"
+saveRDS(
+  cellchat,
+  cellchat_object_file,
+  compress = TRUE
 )
 
 
-#------------------------------------------------------------------------------
-# 33. Final module summary
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "MODULE 13 COMPLETE — Spatial CellChat analysis\n",
-  "============================================================\n",
-  "Samples analyzed:                    ",
-  paste(
-    names(CellChat_results),
-    collapse = ", "
-  ),
-  "\n",
-  "CellChat grouping variable:          ",
-  cellchat_group_column,
-  "\n",
-  "Minimum spots/group:                ",
-  minimum_spots_per_group,
-  "\n",
-  "Per-slide CellChat objects:          ",
-  length(CellChat_results),
-  "\n",
-  "Niacin unique malignant interactions:",
-  nrow(niacin_unique),
-  "\n",
-  "Niacin-enriched malignant interactions:",
-  nrow(niacin_enriched),
-  "\n",
-  "Niacin-specific malignant outgoing: ",
-  nrow(niacin_specific_outgoing),
-  "\n",
-  "Niacin-specific malignant incoming: ",
-  nrow(niacin_specific_incoming),
-  "\n",
-  "\n",
-  "CellChat objects:\n",
-  "  ", cellchat_object_directory, "\n",
-  "\n",
-  "Primary CellChat result list:\n",
-  "  ", all_cellchat_file, "\n",
-  "\n",
-  "Updated spatial object:\n",
-  "  ", updated_spatial_file, "\n",
-  "\n",
-  "Result tables:\n",
-  "  ", results_directory, "\n",
-  "\n",
-  "Figures:\n",
-  "  ", figure_directory, "\n",
-  "\n",
-  "Cross-slide analysis:\n",
-  "  ", cross_slide_results_directory, "\n",
-  "\n",
-  "Next module:\n",
-  "  Spatial CARD deconvolution / downstream analyses\n",
-  "============================================================\n\n",
-  sep = ""
+message(
+  "Module 12 complete: ",
+  ncol(spatial_cellchat),
+  " spatial spots across ",
+  length(levels(cellchat@idents)),
+  " CellChat identities and ",
+  nrow(pathway_summary),
+  " detected signaling pathways."
 )
 ```
 

@@ -10,53 +10,42 @@ date: "2026-08-11"
 #==============================================================================
 
 # Purpose:
-#   Normalize the QC-filtered spatial transcriptomics dataset generated in
-#   Module 06 using SCTransform, perform PCA, evaluate sample-associated
-#   structure before correction, construct an initial clustering solution,
-#   apply Harmony batch correction using sample identity, construct the final
-#   nearest-neighbor graph and clusters from Harmony embeddings, generate
-#   UMAP and t-SNE representations, examine cluster composition across slides,
-#   visualize final clusters in tissue space, validate the processed object,
-#   and save the integrated spatial Seurat object for downstream analyses.
+#   Normalize the QC-filtered spatial transcriptomics dataset using
+#   SCTransform, assess sample-associated structure, apply Harmony integration,
+#   cluster spots using the Harmony representation, generate UMAP embeddings,
+#   visualize clusters in tissue space, and save the processed spatial object.
 #
 # Input:
 #   data/processed/spatial/
 #     spatial_QC_filtered_seurat.rds
 #
-# Primary output object:
+# Output:
 #   data/processed/spatial/
 #     spatial_integrated_clustered_seurat.rds
 #
-# Output tables:
 #   results/spatial/processing/
-#
-# Output figures:
 #   figures/spatial/processing/
 #
-# Processing parameters:
+# Processing:
 #   Normalization:       SCTransform
-#   Input assay:         Spatial
-#   Normalized assay:    SCT
+#   Variable features:   3000
 #   PCA components:      30
 #   Dimensions used:     1:30
-#   Clustering resolution:
-#                       0.5
 #   Batch variable:      sample
-#   Batch correction:    Harmony
+#   Integration:         Harmony
+#   Clustering:          Harmony nearest-neighbor graph
+#   Resolution:          0.5
+#   Visualization:       UMAP
 #
 # Notes:
 #   - Raw Spatial counts are retained for downstream inferCNV and CARD.
-#   - Uncorrected PCA/UMAP/t-SNE plots are retained as batch-effect
-#     diagnostics.
-#   - Final clustering is performed on the Harmony representation.
-#   - Graph names are defined explicitly so FindClusters() cannot
-#     accidentally use an unintended graph.
+#   - Uncorrected UMAP is used to assess sample-associated structure.
+#   - Final clustering and UMAP are based on the Harmony representation.
 #   - Differential expression is performed separately in Module 08.
-#==============================================================================
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -66,46 +55,31 @@ suppressPackageStartupMessages({
   library(dplyr)
   library(ggplot2)
   library(patchwork)
-  library(future)
   library(here)
 })
-
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
 
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
+# Analysis parameters
 
 input_assay <- "Spatial"
-
 normalized_assay <- "SCT"
 
-number_pcs <- 30
+variable_features <- 3000
 
+number_pcs <- 30
 analysis_dimensions <- 1:30
 
 clustering_resolution <- 0.5
 
 harmony_group_variable <- "sample"
 
-uncorrected_nn_graph <- "SCT_pca_nn"
-
-uncorrected_snn_graph <- "SCT_pca_snn"
-
 harmony_nn_graph <- "SCT_harmony_nn"
-
 harmony_snn_graph <- "SCT_harmony_snn"
 
 
-#------------------------------------------------------------------------------
-# 4. Define repository paths
-#------------------------------------------------------------------------------
+# Repository paths
 
 processed_directory <- here::here(
   "data",
@@ -125,19 +99,20 @@ figure_directory <- here::here(
   "processing"
 )
 
-directories_to_create <- c(
+
+for (directory in c(
   processed_directory,
   results_directory,
   figure_directory
-)
+)) {
 
-for (directory in directories_to_create) {
   dir.create(
     directory,
     recursive = TRUE,
     showWarnings = FALSE
   )
 }
+
 
 input_file <- file.path(
   processed_directory,
@@ -149,68 +124,45 @@ output_file <- file.path(
   "spatial_integrated_clustered_seurat.rds"
 )
 
-cat(
-  "\n============================================================\n",
-  "MODULE 07 — Spatial normalization, integration, and clustering\n",
-  "============================================================\n",
-  "Repository root:    ", here::here(), "\n",
-  "Input object:       ", input_file, "\n",
-  "Processed data:     ", processed_directory, "\n",
-  "Results directory: ", results_directory, "\n",
-  "Figure directory:  ", figure_directory, "\n",
-  "============================================================\n\n",
-  sep = ""
-)
-
 
 #------------------------------------------------------------------------------
-# 5. Validate and load Module 06 output
+# 2. Load QC-filtered spatial object
 #------------------------------------------------------------------------------
 
 if (!file.exists(input_file)) {
+
   stop(
-    "Module 06 output was not found:\n",
-    input_file,
-    "\n\nRun 06_spatial_assembly_qc.Rmd before Module 07."
+    "Module 06 output not found: ",
+    input_file
   )
 }
 
-cat(
-  "Loading QC-filtered spatial Seurat object...\n"
+
+message(
+  "Loading QC-filtered spatial object..."
 )
 
 spatial_object <- readRDS(
   input_file
 )
 
-if (!inherits(spatial_object, "Seurat")) {
-  stop(
-    "Loaded input file is not a valid Seurat object."
-  )
-}
-
-if (!input_assay %in% Seurat::Assays(spatial_object)) {
-  stop(
-    "Spatial assay was not found in the input Seurat object."
-  )
-}
 
 required_metadata <- c(
   "sample",
-  "condition",
-  "nCount_Spatial",
-  "nFeature_Spatial",
-  "percent.mt"
+  "condition"
 )
+
 
 missing_metadata <- setdiff(
   required_metadata,
   colnames(spatial_object@meta.data)
 )
 
+
 if (length(missing_metadata) > 0) {
+
   stop(
-    "Required metadata column(s) missing from input object:\n",
+    "Required metadata missing: ",
     paste(
       missing_metadata,
       collapse = ", "
@@ -218,106 +170,32 @@ if (length(missing_metadata) > 0) {
   )
 }
 
-expected_samples <- c(
-  "Normal_Tissue",
-  "Niacin_Treatment",
-  "Vehicle_1",
-  "Vehicle_2"
-)
 
-observed_samples <- sort(
-  unique(
-    as.character(
-      spatial_object$sample
-    )
-  )
-)
+if (!input_assay %in% Seurat::Assays(spatial_object)) {
 
-if (!identical(
-  sort(expected_samples),
-  observed_samples
-)) {
   stop(
-    "Unexpected spatial sample identities were detected.\n",
-    "Observed samples: ",
-    paste(
-      observed_samples,
-      collapse = ", "
-    )
+    "Spatial assay not found."
   )
 }
 
-expected_images <- c(
-  "Naive_A9",
-  "Niacin2_B5",
-  "Vehicle1_C5",
-  "Vehicle2_D5"
-)
-
-missing_images <- setdiff(
-  expected_images,
-  Seurat::Images(spatial_object)
-)
-
-if (length(missing_images) > 0) {
-  stop(
-    "One or more expected spatial images are missing:\n",
-    paste(
-      missing_images,
-      collapse = ", "
-    )
-  )
-}
 
 Seurat::DefaultAssay(
   spatial_object
 ) <- input_assay
 
-cat(
-  "Object loaded successfully:\n",
-  "  Features: ", nrow(spatial_object), "\n",
-  "  Spots:    ", ncol(spatial_object), "\n",
-  "  Samples:  ",
+
+# Join Seurat v5 Spatial layers before normalization.
+
+if (
   length(
-    unique(
-      spatial_object$sample
+    SeuratObject::Layers(
+      spatial_object[[input_assay]]
     )
-  ),
-  "\n",
-  "  Images:   ",
-  length(
-    Seurat::Images(
-      spatial_object
-    )
-  ),
-  "\n",
-  sep = ""
-)
+  ) > 1
+) {
 
-
-#------------------------------------------------------------------------------
-# 6. Inspect Spatial assay layers
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Inspecting Spatial assay layers\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_layers <- SeuratObject::Layers(
-  spatial_object[[input_assay]]
-)
-
-print(
-  spatial_layers
-)
-
-if (sum(grepl("^counts", spatial_layers)) > 1) {
-  cat(
-    "\nMultiple Spatial count layers detected.\n",
-    "Joining layers before SCTransform...\n",
-    sep = ""
+  message(
+    "Joining Spatial assay layers..."
   )
 
   spatial_object <- SeuratObject::JoinLayers(
@@ -326,89 +204,54 @@ if (sum(grepl("^counts", spatial_layers)) > 1) {
   )
 }
 
-cat(
-  "\nSpatial assay layers after layer check:\n"
+
+message(
+  "Loaded ",
+  ncol(spatial_object),
+  " spots across ",
+  length(unique(spatial_object$sample)),
+  " samples."
 )
 
+
 print(
-  SeuratObject::Layers(
-    spatial_object[[input_assay]]
+  table(
+    spatial_object$sample
   )
 )
 
 
 #------------------------------------------------------------------------------
-# Configure memory settings for SCTransform
+# 3. Normalize expression and perform PCA
 #------------------------------------------------------------------------------
+
+message(
+  "Running SCTransform normalization..."
+)
 
 options(
-  future.globals.maxSize = 4 * 1024^3
-)
-
-future::plan(
-  "sequential"
-)
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Configuring SCTransform memory settings\n",
-  "------------------------------------------------------------\n",
-  "Future plan: sequential\n",
-  "Maximum exported globals size: 4 GB\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 8. Normalize spatial expression using SCTransform
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Running SCTransform normalization\n",
-  "------------------------------------------------------------\n"
+  future.globals.maxSize = 2 * 1024^3
 )
 
 spatial_object <- Seurat::SCTransform(
   object = spatial_object,
   assay = input_assay,
   new.assay.name = normalized_assay,
-  variable.features.n = 3000,
+  variable.features.n = variable_features,
   return.only.var.genes = FALSE,
   verbose = FALSE
 )
 
-if (!normalized_assay %in% Seurat::Assays(spatial_object)) {
-  stop(
-    "SCTransform did not create the expected SCT assay."
-  )
-}
 
 Seurat::DefaultAssay(
   spatial_object
 ) <- normalized_assay
 
-cat(
-  "SCTransform completed successfully.\n",
-  "Variable features identified: ",
-  length(
-    Seurat::VariableFeatures(
-      spatial_object
-    )
-  ),
-  "\n",
-  sep = ""
+
+message(
+  "Running PCA..."
 )
 
-#------------------------------------------------------------------------------
-# 8. Perform principal component analysis
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Performing principal component analysis\n",
-  "------------------------------------------------------------\n"
-)
 
 spatial_object <- Seurat::RunPCA(
   object = spatial_object,
@@ -420,29 +263,8 @@ spatial_object <- Seurat::RunPCA(
   verbose = FALSE
 )
 
-if (!"pca" %in% names(spatial_object@reductions)) {
-  stop(
-    "PCA reduction was not created successfully."
-  )
-}
 
-cat(
-  "PCA completed successfully.\n",
-  "Principal components calculated: ",
-  ncol(
-    Seurat::Embeddings(
-      spatial_object,
-      reduction = "pca"
-    )
-  ),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 9. Generate PCA elbow plot
-#------------------------------------------------------------------------------
+# PCA elbow plot
 
 pca_elbow_plot <- Seurat::ElbowPlot(
   spatial_object,
@@ -452,17 +274,17 @@ pca_elbow_plot <- Seurat::ElbowPlot(
     title = "Spatial PCA Elbow Plot"
   )
 
+
 print(
   pca_elbow_plot
 )
 
-pca_elbow_file <- file.path(
-  figure_directory,
-  "spatial_PCA_elbow_plot.png"
-)
 
 ggplot2::ggsave(
-  filename = pca_elbow_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_PCA_elbow_plot.png"
+  ),
   plot = pca_elbow_plot,
   width = 7,
   height = 5,
@@ -471,149 +293,12 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 10. Assess sample-associated structure in PCA space
+# 4. Assess sample-associated structure before Harmony
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Assessing sample-associated structure before Harmony\n",
-  "------------------------------------------------------------\n"
-)
-
-pca_sample_plot <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "pca",
-  group.by = "sample"
-) +
-  ggplot2::labs(
-    title = "Spatial PCA by Sample"
-  )
-
-pca_condition_plot <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "pca",
-  group.by = "condition"
-) +
-  ggplot2::labs(
-    title = "Spatial PCA by Condition"
-  )
-
-print(
-  pca_sample_plot
-)
-
-print(
-  pca_condition_plot
-)
-
-pca_sample_file <- file.path(
-  figure_directory,
-  "spatial_PCA_by_sample.png"
-)
-
-pca_condition_file <- file.path(
-  figure_directory,
-  "spatial_PCA_by_condition.png"
-)
-
-ggplot2::ggsave(
-  filename = pca_sample_file,
-  plot = pca_sample_plot,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = pca_condition_file,
-  plot = pca_condition_plot,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 11. Construct uncorrected PCA nearest-neighbor graph
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Constructing uncorrected PCA neighbor graph\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_object <- Seurat::FindNeighbors(
-  object = spatial_object,
-  reduction = "pca",
-  dims = analysis_dimensions,
-  graph.name = c(
-    uncorrected_nn_graph,
-    uncorrected_snn_graph
-  ),
-  verbose = FALSE
-)
-
-available_graphs <- names(
-  spatial_object@graphs
-)
-
-cat(
-  "Available graphs after uncorrected FindNeighbors():\n"
-)
-
-print(
-  available_graphs
-)
-
-if (!uncorrected_snn_graph %in% available_graphs) {
-  stop(
-    "Expected uncorrected SNN graph was not created:\n",
-    uncorrected_snn_graph
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 12. Perform initial uncorrected clustering
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Performing initial PCA-based clustering\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_object <- Seurat::FindClusters(
-  object = spatial_object,
-  graph.name = uncorrected_snn_graph,
-  resolution = clustering_resolution,
-  cluster.name = "uncorrected_cluster",
-  random.seed = 1234,
-  verbose = FALSE
-)
-
-if (!"uncorrected_cluster" %in% colnames(spatial_object@meta.data)) {
-  stop(
-    "Initial uncorrected clustering metadata was not created."
-  )
-}
-
-cat(
-  "Initial PCA-based clusters identified: ",
-  length(
-    unique(
-      spatial_object$uncorrected_cluster
-    )
-  ),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 13. Generate uncorrected UMAP
-#------------------------------------------------------------------------------
+# Generate an uncorrected UMAP from the PCA representation.
+# This embedding is retained only as a diagnostic for sample-associated
+# structure before Harmony integration.
 
 spatial_object <- Seurat::RunUMAP(
   object = spatial_object,
@@ -625,14 +310,16 @@ spatial_object <- Seurat::RunUMAP(
   verbose = FALSE
 )
 
+
 uncorrected_umap_sample <- Seurat::DimPlot(
   spatial_object,
   reduction = "umap_uncorrected",
   group.by = "sample"
 ) +
   ggplot2::labs(
-    title = "Uncorrected Spatial UMAP by Sample"
+    title = "Uncorrected UMAP by Sample"
   )
+
 
 uncorrected_umap_condition <- Seurat::DimPlot(
   spatial_object,
@@ -640,182 +327,44 @@ uncorrected_umap_condition <- Seurat::DimPlot(
   group.by = "condition"
 ) +
   ggplot2::labs(
-    title = "Uncorrected Spatial UMAP by Condition"
+    title = "Uncorrected UMAP by Condition"
   )
 
-uncorrected_umap_cluster <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "umap_uncorrected",
-  group.by = "uncorrected_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Uncorrected Spatial UMAP by Cluster"
-  )
-
-print(
-  uncorrected_umap_sample
-)
-
-print(
-  uncorrected_umap_condition
-)
-
-print(
-  uncorrected_umap_cluster
-)
-
-uncorrected_umap_sample_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_UMAP_by_sample.png"
-)
-
-uncorrected_umap_condition_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_UMAP_by_condition.png"
-)
-
-uncorrected_umap_cluster_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_UMAP_by_cluster.png"
-)
 
 ggplot2::ggsave(
-  filename = uncorrected_umap_sample_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_uncorrected_UMAP_by_sample.png"
+  ),
   plot = uncorrected_umap_sample,
   width = 7,
   height = 6,
   dpi = 600
 )
 
+
 ggplot2::ggsave(
-  filename = uncorrected_umap_condition_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_uncorrected_UMAP_by_condition.png"
+  ),
   plot = uncorrected_umap_condition,
   width = 7,
   height = 6,
   dpi = 600
 )
 
-ggplot2::ggsave(
-  filename = uncorrected_umap_cluster_file,
-  plot = uncorrected_umap_cluster,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
 
 #------------------------------------------------------------------------------
-# 14. Generate uncorrected t-SNE
+# 5. Harmony integration and clustering
 #------------------------------------------------------------------------------
 
-spatial_object <- Seurat::RunTSNE(
-  object = spatial_object,
-  reduction = "pca",
-  dims = analysis_dimensions,
-  reduction.name = "tsne_uncorrected",
-  reduction.key = "tSNEuncorrected_",
-  seed.use = 1234,
-  check_duplicates = FALSE
-)
-
-uncorrected_tsne_sample <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "tsne_uncorrected",
-  group.by = "sample"
-) +
-  ggplot2::labs(
-    title = "Uncorrected Spatial t-SNE by Sample"
-  )
-
-uncorrected_tsne_cluster <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "tsne_uncorrected",
-  group.by = "uncorrected_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Uncorrected Spatial t-SNE by Cluster"
-  )
-
-print(
-  uncorrected_tsne_sample
-)
-
-print(
-  uncorrected_tsne_cluster
-)
-
-uncorrected_tsne_sample_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_tSNE_by_sample.png"
-)
-
-uncorrected_tsne_cluster_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_tSNE_by_cluster.png"
-)
-
-ggplot2::ggsave(
-  filename = uncorrected_tsne_sample_file,
-  plot = uncorrected_tsne_sample,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = uncorrected_tsne_cluster_file,
-  plot = uncorrected_tsne_cluster,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 15. Save uncorrected batch-assessment overview
-#------------------------------------------------------------------------------
-
-uncorrected_overview <- (
-  pca_sample_plot |
-  uncorrected_umap_sample |
-  uncorrected_tsne_sample
-)
-
-print(
-  uncorrected_overview
-)
-
-uncorrected_overview_file <- file.path(
-  figure_directory,
-  "spatial_uncorrected_batch_assessment.png"
-)
-
-ggplot2::ggsave(
-  filename = uncorrected_overview_file,
-  plot = uncorrected_overview,
-  width = 18,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 16. Run Harmony batch correction
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Running Harmony batch correction\n",
-  "------------------------------------------------------------\n",
-  "Grouping variable: ",
+message(
+  "Running Harmony integration by ",
   harmony_group_variable,
-  "\n",
-  sep = ""
+  "..."
 )
+
 
 spatial_object <- harmony::RunHarmony(
   object = spatial_object,
@@ -827,98 +376,8 @@ spatial_object <- harmony::RunHarmony(
   verbose = TRUE
 )
 
-if (!"harmony" %in% names(spatial_object@reductions)) {
-  stop(
-    "Harmony reduction was not created successfully."
-  )
-}
 
-harmony_embeddings <- Seurat::Embeddings(
-  spatial_object,
-  reduction = "harmony"
-)
-
-if (ncol(harmony_embeddings) < max(analysis_dimensions)) {
-  stop(
-    "Harmony produced fewer dimensions than required for downstream analysis."
-  )
-}
-
-cat(
-  "Harmony completed successfully:\n",
-  "  Dimensions: ",
-  ncol(harmony_embeddings),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 17. Examine Harmony embedding by sample
-#------------------------------------------------------------------------------
-
-harmony_sample_plot <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "harmony",
-  group.by = "sample"
-) +
-  ggplot2::labs(
-    title = "Harmony Embedding by Sample"
-  )
-
-harmony_condition_plot <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "harmony",
-  group.by = "condition"
-) +
-  ggplot2::labs(
-    title = "Harmony Embedding by Condition"
-  )
-
-print(
-  harmony_sample_plot
-)
-
-print(
-  harmony_condition_plot
-)
-
-harmony_sample_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_by_sample.png"
-)
-
-harmony_condition_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_by_condition.png"
-)
-
-ggplot2::ggsave(
-  filename = harmony_sample_file,
-  plot = harmony_sample_plot,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = harmony_condition_file,
-  plot = harmony_condition_plot,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 18. Construct Harmony nearest-neighbor graph
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Constructing Harmony neighbor graph\n",
-  "------------------------------------------------------------\n"
-)
+# Construct the nearest-neighbor graph using Harmony embeddings.
 
 spatial_object <- Seurat::FindNeighbors(
   object = spatial_object,
@@ -931,35 +390,8 @@ spatial_object <- Seurat::FindNeighbors(
   verbose = FALSE
 )
 
-available_graphs <- names(
-  spatial_object@graphs
-)
 
-cat(
-  "Available graphs after Harmony FindNeighbors():\n"
-)
-
-print(
-  available_graphs
-)
-
-if (!harmony_snn_graph %in% available_graphs) {
-  stop(
-    "Expected Harmony SNN graph was not created:\n",
-    harmony_snn_graph
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 19. Perform final Harmony-based clustering
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Performing final Harmony-based clustering\n",
-  "------------------------------------------------------------\n"
-)
+# Cluster the Harmony-integrated dataset.
 
 spatial_object <- Seurat::FindClusters(
   object = spatial_object,
@@ -970,41 +402,30 @@ spatial_object <- Seurat::FindClusters(
   verbose = FALSE
 )
 
-if (!"spatial_cluster" %in% colnames(spatial_object@meta.data)) {
-  stop(
-    "Final Harmony cluster metadata was not created."
-  )
-}
 
 spatial_object$spatial_cluster <- as.character(
   spatial_object$spatial_cluster
 )
 
-spatial_object$seurat_clusters <- spatial_object$spatial_cluster
 
-spatial_object$SCT_snn_res.0.5 <- spatial_object$spatial_cluster
+spatial_object$seurat_clusters <-
+  spatial_object$spatial_cluster
+
 
 Seurat::Idents(
   spatial_object
 ) <- "spatial_cluster"
 
-number_clusters <- length(
-  unique(
-    spatial_object$spatial_cluster
+
+message(
+  "Clusters identified: ",
+  length(
+    unique(
+      spatial_object$spatial_cluster
+    )
   )
 )
 
-cat(
-  "Final Harmony clustering completed successfully.\n",
-  "Clusters identified: ",
-  number_clusters,
-  "\n",
-  sep = ""
-)
-
-cat(
-  "\nSpots per final cluster:\n"
-)
 
 print(
   table(
@@ -1014,14 +435,8 @@ print(
 
 
 #------------------------------------------------------------------------------
-# 20. Generate final Harmony UMAP
+# 6. Generate final Harmony UMAP
 #------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating final Harmony UMAP\n",
-  "------------------------------------------------------------\n"
-)
 
 spatial_object <- Seurat::RunUMAP(
   object = spatial_object,
@@ -1033,43 +448,8 @@ spatial_object <- Seurat::RunUMAP(
   verbose = FALSE
 )
 
-if (!"umap" %in% names(spatial_object@reductions)) {
-  stop(
-    "Final Harmony UMAP was not created successfully."
-  )
-}
 
-
-#------------------------------------------------------------------------------
-# 21. Generate final Harmony t-SNE
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating final Harmony t-SNE\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_object <- Seurat::RunTSNE(
-  object = spatial_object,
-  reduction = "harmony",
-  dims = analysis_dimensions,
-  reduction.name = "tsne",
-  reduction.key = "tSNE_",
-  seed.use = 1234,
-  check_duplicates = FALSE
-)
-
-if (!"tsne" %in% names(spatial_object@reductions)) {
-  stop(
-    "Final Harmony t-SNE was not created successfully."
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 22. Visualize final UMAP
-#------------------------------------------------------------------------------
+# Cluster UMAP
 
 final_umap_cluster <- Seurat::DimPlot(
   spatial_object,
@@ -1079,8 +459,11 @@ final_umap_cluster <- Seurat::DimPlot(
   repel = TRUE
 ) +
   ggplot2::labs(
-    title = "Harmony Spatial Clusters"
+    title = "Spatial Clusters"
   )
+
+
+# Sample UMAP
 
 final_umap_sample <- Seurat::DimPlot(
   spatial_object,
@@ -1091,6 +474,9 @@ final_umap_sample <- Seurat::DimPlot(
     title = "Harmony UMAP by Sample"
   )
 
+
+# Condition UMAP
+
 final_umap_condition <- Seurat::DimPlot(
   spatial_object,
   reduction = "umap",
@@ -1099,6 +485,7 @@ final_umap_condition <- Seurat::DimPlot(
   ggplot2::labs(
     title = "Harmony UMAP by Condition"
   )
+
 
 print(
   final_umap_cluster
@@ -1112,39 +499,36 @@ print(
   final_umap_condition
 )
 
-final_umap_cluster_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_UMAP_clusters.png"
-)
-
-final_umap_sample_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_UMAP_by_sample.png"
-)
-
-final_umap_condition_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_UMAP_by_condition.png"
-)
 
 ggplot2::ggsave(
-  filename = final_umap_cluster_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_Harmony_UMAP_clusters.png"
+  ),
   plot = final_umap_cluster,
   width = 7,
   height = 6,
   dpi = 600
 )
 
+
 ggplot2::ggsave(
-  filename = final_umap_sample_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_Harmony_UMAP_by_sample.png"
+  ),
   plot = final_umap_sample,
   width = 7,
   height = 6,
   dpi = 600
 )
 
+
 ggplot2::ggsave(
-  filename = final_umap_condition_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_Harmony_UMAP_by_condition.png"
+  ),
   plot = final_umap_condition,
   width = 7,
   height = 6,
@@ -1152,27 +536,21 @@ ggplot2::ggsave(
 )
 
 
-#------------------------------------------------------------------------------
-# 23. Save combined final UMAP overview
-#------------------------------------------------------------------------------
+# Save the combined UMAP directly rather than printing a large patchwork
+# into the RStudio plotting device.
 
 final_umap_overview <- (
   final_umap_cluster |
-  final_umap_sample |
-  final_umap_condition
+    final_umap_sample |
+    final_umap_condition
 )
 
-print(
-  final_umap_overview
-)
-
-final_umap_overview_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_UMAP_overview.png"
-)
 
 ggplot2::ggsave(
-  filename = final_umap_overview_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_Harmony_UMAP_overview.png"
+  ),
   plot = final_umap_overview,
   width = 18,
   height = 6,
@@ -1181,93 +559,41 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 24. Visualize final t-SNE
+# 7. Assess Harmony integration
 #------------------------------------------------------------------------------
 
-final_tsne_cluster <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "tsne",
-  group.by = "spatial_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Harmony t-SNE by Cluster"
-  )
-
-final_tsne_sample <- Seurat::DimPlot(
-  spatial_object,
-  reduction = "tsne",
-  group.by = "sample"
-) +
-  ggplot2::labs(
-    title = "Harmony t-SNE by Sample"
-  )
-
-print(
-  final_tsne_cluster
-)
-
-print(
-  final_tsne_sample
-)
-
-final_tsne_cluster_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_tSNE_clusters.png"
-)
-
-final_tsne_sample_file <- file.path(
-  figure_directory,
-  "spatial_Harmony_tSNE_by_sample.png"
-)
-
-ggplot2::ggsave(
-  filename = final_tsne_cluster_file,
-  plot = final_tsne_cluster,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = final_tsne_sample_file,
-  plot = final_tsne_sample,
-  width = 7,
-  height = 6,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 25. Compare uncorrected and Harmony UMAPs
-#------------------------------------------------------------------------------
+# Compare the same UMAP representation before and after Harmony correction.
 
 batch_correction_comparison <- (
   uncorrected_umap_sample |
-  final_umap_sample
-)
+    final_umap_sample
+) / (
+  uncorrected_umap_condition |
+    final_umap_condition
+) +
+  patchwork::plot_annotation(
+    title = "Spatial Batch-Correction Assessment",
+    subtitle = paste0(
+      "Left: uncorrected PCA-based UMAP | ",
+      "Right: Harmony-corrected UMAP"
+    )
+  )
 
-print(
-  batch_correction_comparison
-)
-
-batch_correction_comparison_file <- file.path(
-  figure_directory,
-  "spatial_batch_correction_comparison.png"
-)
 
 ggplot2::ggsave(
-  filename = batch_correction_comparison_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_batch_correction_comparison.png"
+  ),
   plot = batch_correction_comparison,
   width = 14,
-  height = 6,
+  height = 12,
   dpi = 600
 )
 
 
 #------------------------------------------------------------------------------
-# 26. Examine final cluster composition by sample
+# 8. Examine cluster composition
 #------------------------------------------------------------------------------
 
 cluster_sample_counts <- spatial_object@meta.data %>%
@@ -1277,6 +603,7 @@ cluster_sample_counts <- spatial_object@meta.data %>%
     condition,
     name = "spots"
   )
+
 
 cluster_sample_proportions <- cluster_sample_counts %>%
   dplyr::group_by(
@@ -1290,31 +617,21 @@ cluster_sample_proportions <- cluster_sample_counts %>%
   ) %>%
   dplyr::ungroup()
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Final cluster composition by sample\n",
-  "------------------------------------------------------------\n"
-)
 
 print(
   cluster_sample_proportions
 )
 
-cluster_composition_file <- file.path(
-  results_directory,
-  "spatial_cluster_sample_composition.csv"
-)
 
 utils::write.csv(
   cluster_sample_proportions,
-  cluster_composition_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_sample_composition.csv"
+  ),
   row.names = FALSE
 )
 
-
-#------------------------------------------------------------------------------
-# 27. Plot final cluster composition by sample
-#------------------------------------------------------------------------------
 
 cluster_composition_plot <- ggplot2::ggplot(
   cluster_sample_proportions,
@@ -1335,27 +652,19 @@ cluster_composition_plot <- ggplot2::ggplot(
   ) +
   ggplot2::theme_classic(
     base_size = 12
-  ) +
-  ggplot2::theme(
-    plot.title = ggplot2::element_text(
-      face = "bold"
-    ),
-    axis.title = ggplot2::element_text(
-      face = "bold"
-    )
   )
+
 
 print(
   cluster_composition_plot
 )
 
-cluster_composition_plot_file <- file.path(
-  figure_directory,
-  "spatial_cluster_sample_composition.png"
-)
 
 ggplot2::ggsave(
-  filename = cluster_composition_plot_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_cluster_sample_composition.png"
+  ),
   plot = cluster_composition_plot,
   width = 10,
   height = 6,
@@ -1364,77 +673,83 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 28. Visualize final clusters on each tissue section
+# 9. Visualize clusters in tissue space
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Visualizing final clusters in tissue space\n",
-  "------------------------------------------------------------\n"
+# Preserve the image names established during Module 06.
+
+spatial_images <- c(
+  "Naive_A9",
+  "Niacin2_B5",
+  "Vehicle1_C5",
+  "Vehicle2_D5"
 )
 
-normal_spatial_clusters <- Seurat::SpatialDimPlot(
-  spatial_object,
-  images = "Naive_A9",
-  group.by = "spatial_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Normal tissue"
-  )
 
-niacin_spatial_clusters <- Seurat::SpatialDimPlot(
-  spatial_object,
-  images = "Niacin2_B5",
-  group.by = "spatial_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Niacin treatment"
-  )
-
-vehicle1_spatial_clusters <- Seurat::SpatialDimPlot(
-  spatial_object,
-  images = "Vehicle1_C5",
-  group.by = "spatial_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Vehicle 1"
-  )
-
-vehicle2_spatial_clusters <- Seurat::SpatialDimPlot(
-  spatial_object,
-  images = "Vehicle2_D5",
-  group.by = "spatial_cluster",
-  label = TRUE,
-  repel = TRUE
-) +
-  ggplot2::labs(
-    title = "Vehicle 2"
-  )
-
-spatial_cluster_overview <- (
-  normal_spatial_clusters |
-  niacin_spatial_clusters |
-  vehicle1_spatial_clusters |
-  vehicle2_spatial_clusters
+spatial_titles <- c(
+  "Normal tissue",
+  "Niacin treatment",
+  "Vehicle 1",
+  "Vehicle 2"
 )
 
-print(
-  spatial_cluster_overview
+
+spatial_cluster_plots <- lapply(
+  seq_along(spatial_images),
+  function(i) {
+
+    Seurat::SpatialDimPlot(
+      spatial_object,
+      images = spatial_images[i],
+      group.by = "spatial_cluster",
+      label = TRUE,
+      repel = TRUE
+    ) +
+      ggplot2::labs(
+        title = spatial_titles[i]
+      )
+  }
 )
 
-spatial_cluster_overview_file <- file.path(
-  figure_directory,
-  "spatial_clusters_all_slides.png"
+
+# Save individual tissue plots.
+
+spatial_plot_files <- c(
+  "spatial_clusters_Normal_Tissue.png",
+  "spatial_clusters_Niacin_Treatment.png",
+  "spatial_clusters_Vehicle_1.png",
+  "spatial_clusters_Vehicle_2.png"
 )
+
+
+for (i in seq_along(spatial_cluster_plots)) {
+
+  ggplot2::ggsave(
+    filename = file.path(
+      figure_directory,
+      spatial_plot_files[i]
+    ),
+    plot = spatial_cluster_plots[[i]],
+    width = 7,
+    height = 7,
+    dpi = 600
+  )
+}
+
+
+# Save combined tissue overview.
+
+spatial_cluster_overview <- patchwork::wrap_plots(
+  spatial_cluster_plots,
+  nrow = 1
+)
+
 
 ggplot2::ggsave(
-  filename = spatial_cluster_overview_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_clusters_all_slides.png"
+  ),
   plot = spatial_cluster_overview,
   width = 20,
   height = 5,
@@ -1443,64 +758,7 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 29. Save individual spatial cluster plots
-#------------------------------------------------------------------------------
-
-normal_cluster_file <- file.path(
-  figure_directory,
-  "spatial_clusters_Normal_Tissue.png"
-)
-
-niacin_cluster_file <- file.path(
-  figure_directory,
-  "spatial_clusters_Niacin_Treatment.png"
-)
-
-vehicle1_cluster_file <- file.path(
-  figure_directory,
-  "spatial_clusters_Vehicle_1.png"
-)
-
-vehicle2_cluster_file <- file.path(
-  figure_directory,
-  "spatial_clusters_Vehicle_2.png"
-)
-
-ggplot2::ggsave(
-  filename = normal_cluster_file,
-  plot = normal_spatial_clusters,
-  width = 7,
-  height = 7,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = niacin_cluster_file,
-  plot = niacin_spatial_clusters,
-  width = 7,
-  height = 7,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = vehicle1_cluster_file,
-  plot = vehicle1_spatial_clusters,
-  width = 7,
-  height = 7,
-  dpi = 600
-)
-
-ggplot2::ggsave(
-  filename = vehicle2_cluster_file,
-  plot = vehicle2_spatial_clusters,
-  width = 7,
-  height = 7,
-  dpi = 600
-)
-
-
-#------------------------------------------------------------------------------
-# 30. Create final cluster summary table
+# 10. Save results and processed object
 #------------------------------------------------------------------------------
 
 cluster_summary <- spatial_object@meta.data %>%
@@ -1512,31 +770,26 @@ cluster_summary <- spatial_object@meta.data %>%
     spatial_cluster
   )
 
-cat(
-  "\nFinal cluster summary:\n"
-)
 
 print(
   cluster_summary
 )
 
-cluster_summary_file <- file.path(
-  results_directory,
-  "spatial_cluster_summary.csv"
-)
 
 utils::write.csv(
   cluster_summary,
-  cluster_summary_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 31. Save processing parameter table
-#------------------------------------------------------------------------------
+# Record major processing parameters.
 
 processing_parameters <- data.frame(
+
   parameter = c(
     "input_assay",
     "normalized_assay",
@@ -1544,338 +797,59 @@ processing_parameters <- data.frame(
     "variable_features",
     "pca_components",
     "analysis_dimensions",
-    "uncorrected_reduction",
     "batch_variable",
     "batch_correction",
-    "final_reduction",
+    "clustering_reduction",
     "clustering_resolution",
-    "uncorrected_snn_graph",
-    "harmony_snn_graph"
+    "visualization"
   ),
+
   value = c(
     input_assay,
     normalized_assay,
     "SCTransform",
-    3000,
+    variable_features,
     number_pcs,
     paste0(
       min(analysis_dimensions),
       ":",
       max(analysis_dimensions)
     ),
-    "PCA",
     harmony_group_variable,
     "Harmony",
     "Harmony",
     clustering_resolution,
-    uncorrected_snn_graph,
-    harmony_snn_graph
+    "UMAP"
   ),
+
   stringsAsFactors = FALSE
 )
 
-processing_parameter_file <- file.path(
-  results_directory,
-  "spatial_processing_parameters.csv"
-)
 
 utils::write.csv(
   processing_parameters,
-  processing_parameter_file,
+  file.path(
+    results_directory,
+    "spatial_processing_parameters.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 32. Validate final processed spatial object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Validating integrated spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
-
-if (!inherits(spatial_object, "Seurat")) {
-  stop(
-    "Final processed object is not a valid Seurat object."
-  )
-}
-
-required_assays <- c(
-  input_assay,
-  normalized_assay
-)
-
-missing_assays <- setdiff(
-  required_assays,
-  Seurat::Assays(spatial_object)
-)
-
-if (length(missing_assays) > 0) {
-  stop(
-    "Required assay(s) missing from final object:\n",
-    paste(
-      missing_assays,
-      collapse = ", "
-    )
-  )
-}
-
-required_reductions <- c(
-  "pca",
-  "umap_uncorrected",
-  "tsne_uncorrected",
-  "harmony",
-  "umap",
-  "tsne"
-)
-
-missing_reductions <- setdiff(
-  required_reductions,
-  names(spatial_object@reductions)
-)
-
-if (length(missing_reductions) > 0) {
-  stop(
-    "Required dimensionality reduction(s) missing:\n",
-    paste(
-      missing_reductions,
-      collapse = ", "
-    )
-  )
-}
-
-required_cluster_metadata <- c(
-  "uncorrected_cluster",
-  "spatial_cluster",
-  "seurat_clusters",
-  "SCT_snn_res.0.5"
-)
-
-missing_cluster_metadata <- setdiff(
-  required_cluster_metadata,
-  colnames(spatial_object@meta.data)
-)
-
-if (length(missing_cluster_metadata) > 0) {
-  stop(
-    "Required clustering metadata column(s) missing:\n",
-    paste(
-      missing_cluster_metadata,
-      collapse = ", "
-    )
-  )
-}
-
-required_graphs <- c(
-  uncorrected_nn_graph,
-  uncorrected_snn_graph,
-  harmony_nn_graph,
-  harmony_snn_graph
-)
-
-missing_graphs <- setdiff(
-  required_graphs,
-  names(spatial_object@graphs)
-)
-
-if (length(missing_graphs) > 0) {
-  stop(
-    "Required Seurat graph(s) missing:\n",
-    paste(
-      missing_graphs,
-      collapse = ", "
-    )
-  )
-}
-
-missing_images_final <- setdiff(
-  expected_images,
-  Seurat::Images(spatial_object)
-)
-
-if (length(missing_images_final) > 0) {
-  stop(
-    "One or more spatial images were lost during processing:\n",
-    paste(
-      missing_images_final,
-      collapse = ", "
-    )
-  )
-}
-
-if (anyDuplicated(colnames(spatial_object)) > 0) {
-  stop(
-    "Duplicated spot barcodes detected in the processed spatial object."
-  )
-}
-
-if (any(is.na(spatial_object$spatial_cluster))) {
-  stop(
-    "Missing final spatial cluster assignments were detected."
-  )
-}
-
-cat(
-  "Integrated spatial object validation completed successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 33. Save integrated spatial Seurat object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Saving integrated spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
-
 saveRDS(
-  object = spatial_object,
-  file = output_file,
+  spatial_object,
+  output_file,
   compress = TRUE
 )
 
-if (!file.exists(output_file)) {
-  stop(
-    "Integrated spatial Seurat object was not saved successfully:\n",
-    output_file
-  )
-}
 
-cat(
-  "Integrated spatial Seurat object saved successfully.\n"
+message(
+  "Module 07 complete: ",
+  ncol(spatial_object),
+  " spots; ",
+  length(unique(spatial_object$spatial_cluster)),
+  " spatial clusters."
 )
 
-
-#------------------------------------------------------------------------------
-# 34. Validate expected Module 07 outputs
-#------------------------------------------------------------------------------
-
-expected_result_files <- c(
-  cluster_composition_file,
-  cluster_summary_file,
-  processing_parameter_file
-)
-
-expected_figure_files <- c(
-  pca_elbow_file,
-  pca_sample_file,
-  pca_condition_file,
-  uncorrected_umap_sample_file,
-  uncorrected_umap_condition_file,
-  uncorrected_umap_cluster_file,
-  uncorrected_tsne_sample_file,
-  uncorrected_tsne_cluster_file,
-  uncorrected_overview_file,
-  harmony_sample_file,
-  harmony_condition_file,
-  final_umap_cluster_file,
-  final_umap_sample_file,
-  final_umap_condition_file,
-  final_umap_overview_file,
-  final_tsne_cluster_file,
-  final_tsne_sample_file,
-  batch_correction_comparison_file,
-  cluster_composition_plot_file,
-  spatial_cluster_overview_file,
-  normal_cluster_file,
-  niacin_cluster_file,
-  vehicle1_cluster_file,
-  vehicle2_cluster_file
-)
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 07 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 07 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 07 outputs were created successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 35. Final module summary
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "MODULE 07 COMPLETE — Spatial normalization and clustering\n",
-  "============================================================\n",
-  "Features:                ", nrow(spatial_object), "\n",
-  "Spots:                   ", ncol(spatial_object), "\n",
-  "Samples:                 ",
-  length(
-    unique(
-      spatial_object$sample
-    )
-  ),
-  "\n",
-  "Spatial images:          ",
-  length(
-    Seurat::Images(
-      spatial_object
-    )
-  ),
-  "\n",
-  "Normalization:           SCTransform\n",
-  "Variable features:       ",
-  length(
-    Seurat::VariableFeatures(
-      spatial_object
-    )
-  ),
-  "\n",
-  "PCA components:          ", number_pcs, "\n",
-  "Dimensions used:         ",
-  min(analysis_dimensions),
-  ":",
-  max(analysis_dimensions),
-  "\n",
-  "Batch correction:        Harmony\n",
-  "Batch variable:          ", harmony_group_variable, "\n",
-  "Clustering resolution:   ", clustering_resolution, "\n",
-  "Final spatial clusters:  ", number_clusters, "\n",
-  "\n",
-  "Primary output:\n",
-  "  ", output_file, "\n",
-  "\n",
-  "Processing tables:\n",
-  "  ", results_directory, "\n",
-  "\n",
-  "Processing figures:\n",
-  "  ", figure_directory, "\n",
-  "\n",
-  "Next module:\n",
-  "  08_spatial_cluster_dea.Rmd\n",
-  "============================================================\n\n",
-  sep = ""
-)
 ```
 

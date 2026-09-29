@@ -1,0 +1,1110 @@
+---
+title: "Module 05: Single-cell RNA-seq cell-cell communication analysis with CellChat"
+output: html_document
+date: "2026-08-06"
+---
+
+```{r}
+#==============================================================================
+# MODULE 05 — Single-cell CellChat communication analysis
+#==============================================================================
+
+# Purpose:
+#   Infer global cell-cell communication networks from the SingleR-annotated
+#   single-cell RNA-seq dataset using CellChat.
+#
+# Input:
+#   data/processed/single_cell/
+#     GSE298688_SingleR_annotated_seurat.rds
+#
+# Primary outputs:
+#   data/processed/single_cell/cellchat/
+#     GSE298688_CellChat_SingleR_broad.rds
+#     GSE298688_CellChat_input_Seurat.rds
+#
+#   results/single_cell/cellchat/
+#   figures/single_cell/cellchat/
+#
+# Notes:
+#   - Broad SingleR annotations define CellChat groups.
+#   - Unassigned cells are excluded.
+#   - Cell types containing fewer than 10 cells are excluded.
+#   - Large cell populations are downsampled to a maximum of 1,000 cells.
+#   - Communication probabilities use a 10% truncated mean.
+#   - Population size is not incorporated because cell populations are
+#     intentionally downsampled.
+#   - Top pathways are selected only for visualization. Complete CellChat
+#     results are retained in the exported tables and CellChat object.
+
+
+#------------------------------------------------------------------------------
+# 1. Setup
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(CellChat)
+  library(dplyr)
+  library(ggplot2)
+  library(future)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(here)
+})
+
+set.seed(1234)
+
+
+# Analysis parameters
+
+annotation_column <- "SingleR_broad_pruned"
+
+minimum_cells_per_group <- 10
+maximum_cells_per_group <- 1000
+
+communication_mean_type <- "truncatedMean"
+communication_trim <- 0.1
+
+top_n_pathways <- 20
+
+cellchat_workers <- 4
+
+
+# Repository paths
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell"
+)
+
+cellchat_object_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell",
+  "cellchat"
+)
+
+cellchat_results_directory <- here::here(
+  "results",
+  "single_cell",
+  "cellchat"
+)
+
+cellchat_figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "cellchat"
+)
+
+
+for (directory in c(
+  cellchat_object_directory,
+  cellchat_results_directory,
+  cellchat_figure_directory
+)) {
+
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+}
+
+
+input_file <- file.path(
+  processed_directory,
+  "GSE298688_SingleR_annotated_seurat.rds"
+)
+
+cellchat_output_file <- file.path(
+  cellchat_object_directory,
+  "GSE298688_CellChat_SingleR_broad.rds"
+)
+
+cellchat_input_seurat_file <- file.path(
+  cellchat_object_directory,
+  "GSE298688_CellChat_input_Seurat.rds"
+)
+
+
+#------------------------------------------------------------------------------
+# 2. Prepare CellChat input
+#------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+  stop(
+    "Module 04 output not found: ",
+    input_file
+  )
+}
+
+
+message("Loading SingleR-annotated single-cell object...")
+
+single_cell <- readRDS(
+  input_file
+)
+
+DefaultAssay(single_cell) <- "RNA"
+
+
+if (!annotation_column %in% colnames(single_cell@meta.data)) {
+  stop(
+    "Required SingleR annotation column not found: ",
+    annotation_column
+  )
+}
+
+
+# Join Seurat v5 RNA layers before CellChat analysis.
+
+if (
+  length(
+    Layers(
+      single_cell[["RNA"]]
+    )
+  ) > 1
+) {
+
+  message("Joining RNA assay layers...")
+
+  single_cell <- JoinLayers(
+    single_cell,
+    assay = "RNA"
+  )
+}
+
+
+# Remove cells without confident broad SingleR annotations.
+
+valid_cells <- colnames(single_cell)[
+  !is.na(single_cell[[annotation_column]][, 1]) &
+    single_cell[[annotation_column]][, 1] != "Unassigned"
+]
+
+
+single_cell_cellchat <- subset(
+  single_cell,
+  cells = valid_cells
+)
+
+
+single_cell_cellchat$cellchat_cell_type <- factor(
+  single_cell_cellchat[[annotation_column]][, 1]
+)
+
+
+# Remove very small cell populations.
+
+cell_type_counts <- table(
+  single_cell_cellchat$cellchat_cell_type
+)
+
+
+cell_types_to_keep <- names(
+  cell_type_counts[
+    cell_type_counts >= minimum_cells_per_group
+  ]
+)
+
+
+single_cell_cellchat <- subset(
+  single_cell_cellchat,
+  subset = cellchat_cell_type %in% cell_types_to_keep
+)
+
+
+single_cell_cellchat$cellchat_cell_type <- droplevels(
+  single_cell_cellchat$cellchat_cell_type
+)
+
+
+#------------------------------------------------------------------------------
+# 3. Downsample large cell populations
+#------------------------------------------------------------------------------
+
+# Large cell populations are capped to prevent abundant populations such as
+# microglia from dominating computation and to keep group sizes more balanced.
+
+set.seed(1234)
+
+
+cells_by_type <- split(
+  colnames(single_cell_cellchat),
+  single_cell_cellchat$cellchat_cell_type
+)
+
+
+cells_to_keep <- unlist(
+  lapply(
+    cells_by_type,
+    function(cells) {
+
+      if (length(cells) > maximum_cells_per_group) {
+
+        sample(
+          cells,
+          maximum_cells_per_group
+        )
+
+      } else {
+
+        cells
+      }
+    }
+  ),
+  use.names = FALSE
+)
+
+
+single_cell_cellchat <- subset(
+  single_cell_cellchat,
+  cells = cells_to_keep
+)
+
+
+single_cell_cellchat$cellchat_cell_type <- droplevels(
+  single_cell_cellchat$cellchat_cell_type
+)
+
+Idents(single_cell_cellchat) <- "cellchat_cell_type"
+
+
+final_cell_type_counts <- sort(
+  table(
+    single_cell_cellchat$cellchat_cell_type
+  ),
+  decreasing = TRUE
+)
+
+
+print(final_cell_type_counts)
+
+
+cell_type_count_table <- data.frame(
+  cell_type = names(final_cell_type_counts),
+  cells = as.integer(final_cell_type_counts)
+)
+
+
+write.csv(
+  cell_type_count_table,
+  file.path(
+    cellchat_results_directory,
+    "GSE298688_CellChat_cell_type_counts.csv"
+  ),
+  row.names = FALSE
+)
+
+
+message(
+  "CellChat input: ",
+  ncol(single_cell_cellchat),
+  " cells across ",
+  length(final_cell_type_counts),
+  " cell types."
+)
+
+
+#------------------------------------------------------------------------------
+# 4. Run CellChat
+#------------------------------------------------------------------------------
+
+message("Creating CellChat object...")
+
+cellchat <- CellChat::createCellChat(
+  object = single_cell_cellchat,
+  group.by = "cellchat_cell_type",
+  assay = "RNA"
+)
+
+
+# Use the complete mouse CellChat database.
+
+cellchat@DB <- CellChat::CellChatDB.mouse
+
+
+# Retain signaling genes represented in the CellChat database.
+
+cellchat <- CellChat::subsetData(
+  cellchat
+)
+
+
+future::plan(
+  strategy = "multisession",
+  workers = cellchat_workers
+)
+
+
+message(
+  "Identifying overexpressed signaling genes and interactions..."
+)
+
+cellchat <- CellChat::identifyOverExpressedGenes(
+  cellchat
+)
+
+cellchat <- CellChat::identifyOverExpressedInteractions(
+  cellchat
+)
+
+
+message(
+  "Computing cell-cell communication probabilities..."
+)
+
+cellchat <- CellChat::computeCommunProb(
+  object = cellchat,
+  type = communication_mean_type,
+  trim = communication_trim,
+  raw.use = TRUE,
+  population.size = FALSE,
+  distance.use = FALSE,
+  seed.use = 1234
+)
+
+
+cellchat <- CellChat::filterCommunication(
+  cellchat,
+  min.cells = minimum_cells_per_group
+)
+
+
+# Aggregate ligand-receptor interactions into signaling pathways.
+
+cellchat <- CellChat::computeCommunProbPathway(
+  cellchat
+)
+
+cellchat <- CellChat::aggregateNet(
+  cellchat
+)
+
+
+# Calculate incoming and outgoing signaling centrality.
+
+cellchat <- CellChat::netAnalysis_computeCentrality(
+  cellchat,
+  slot.name = "netP"
+)
+
+
+future::plan(
+  strategy = "sequential"
+)
+
+
+message(
+  "CellChat inference complete: ",
+  length(cellchat@netP$pathways),
+  " signaling pathways detected."
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Export communication results
+#------------------------------------------------------------------------------
+
+# Ligand-receptor-level interactions.
+
+communication_table <- CellChat::subsetCommunication(
+  cellchat
+)
+
+
+write.csv(
+  communication_table,
+  file.path(
+    cellchat_results_directory,
+    "GSE298688_CellChat_ligand_receptor_interactions.csv"
+  ),
+  row.names = FALSE
+)
+
+
+# Pathway-level interactions.
+
+pathway_communication_table <- CellChat::subsetCommunication(
+  cellchat,
+  slot.name = "netP"
+)
+
+
+write.csv(
+  pathway_communication_table,
+  file.path(
+    cellchat_results_directory,
+    "GSE298688_CellChat_pathway_interactions.csv"
+  ),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 6. Rank global signaling pathways
+#------------------------------------------------------------------------------
+
+# Sum pathway-level communication probabilities across all source-target
+# combinations to rank global pathway information flow.
+
+pathway_strength <- apply(
+  cellchat@netP$prob,
+  3,
+  sum,
+  na.rm = TRUE
+)
+
+
+pathway_strength_table <- data.frame(
+  pathway = names(pathway_strength),
+  information_flow = as.numeric(pathway_strength)
+) %>%
+  arrange(
+    desc(information_flow)
+  )
+
+
+write.csv(
+  pathway_strength_table,
+  file.path(
+    cellchat_results_directory,
+    "GSE298688_CellChat_pathway_information_flow.csv"
+  ),
+  row.names = FALSE
+)
+
+
+top_pathways <- pathway_strength_table %>%
+  dplyr::slice_head(
+    n = top_n_pathways
+  ) %>%
+  dplyr::pull(
+    pathway
+  )
+
+
+message(
+  "Top pathways selected for visualization: ",
+  paste(
+    top_pathways,
+    collapse = ", "
+  )
+)
+
+#------------------------------------------------------------------------------
+# Global communication heatmaps
+#------------------------------------------------------------------------------
+
+# Heatmaps provide a complementary view of the aggregated network.
+# Rows represent sending populations and columns represent receiving
+# populations.
+
+interaction_count_heatmap <- CellChat::netVisual_heatmap(
+  cellchat,
+  measure = "count",
+  color.heatmap = "Blues"
+)
+
+interaction_strength_heatmap <- CellChat::netVisual_heatmap(
+  cellchat,
+  measure = "weight",
+  color.heatmap = "Blues"
+)
+
+
+# Save interaction-number heatmap.
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_interaction_count_heatmap.png"
+  ),
+  width = 8,
+  height = 7,
+  units = "in",
+  res = 400
+)
+
+ComplexHeatmap::draw(
+  interaction_count_heatmap
+)
+
+dev.off()
+
+
+# Save interaction-strength heatmap.
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_interaction_strength_heatmap.png"
+  ),
+  width = 8,
+  height = 7,
+  units = "in",
+  res = 400
+)
+
+ComplexHeatmap::draw(
+  interaction_strength_heatmap
+)
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 7. Global CellChat networks
+#------------------------------------------------------------------------------
+
+group_size <- as.numeric(
+  table(
+    cellchat@idents
+  )
+)
+
+
+# Number of inferred interactions
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_interaction_count_network.png"
+  ),
+  width = 8,
+  height = 8,
+  units = "in",
+  res = 400
+)
+
+CellChat::netVisual_circle(
+  cellchat@net$count,
+  vertex.weight = group_size,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Number of interactions"
+)
+
+dev.off()
+
+
+# Overall inferred interaction strength
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_interaction_strength_network.png"
+  ),
+  width = 8,
+  height = 8,
+  units = "in",
+  res = 400
+)
+
+CellChat::netVisual_circle(
+  cellchat@net$weight,
+  vertex.weight = group_size,
+  weight.scale = TRUE,
+  label.edge = FALSE,
+  title.name = "Interaction strength"
+)
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 8. Global pathway summaries
+#------------------------------------------------------------------------------
+
+# Show only the strongest pathways in publication-facing figures.
+# The complete pathway analysis remains available in the CellChat object
+# and exported tables.
+
+
+# Top pathway information flow
+
+top_pathway_table <- pathway_strength_table %>%
+  dplyr::slice_head(
+    n = top_n_pathways
+  ) %>%
+  dplyr::mutate(
+    pathway = factor(
+      pathway,
+      levels = rev(pathway)
+    )
+  )
+
+
+information_flow_plot <- ggplot(
+  top_pathway_table,
+  aes(
+    x = pathway,
+    y = information_flow
+  )
+) +
+  geom_col(
+    width = 0.75
+  ) +
+  coord_flip() +
+  labs(
+    title = "Top Signaling Pathways",
+    x = NULL,
+    y = "Information flow"
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    plot.title = element_text(
+      face = "bold"
+    ),
+    axis.title = element_text(
+      face = "bold"
+    )
+  )
+
+
+print(
+  information_flow_plot
+)
+
+
+ggsave(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_top_pathway_information_flow.png"
+  ),
+  plot = information_flow_plot,
+  width = 8,
+  height = 7,
+  dpi = 400
+)
+
+
+# Incoming signaling patterns
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_top_pathways_incoming_heatmap.png"
+  ),
+  width = 9,
+  height = 7,
+  units = "in",
+  res = 400
+)
+
+
+CellChat::netAnalysis_signalingRole_heatmap(
+  cellchat,
+  pattern = "incoming",
+  signaling = top_pathways,
+  title = "Incoming signaling patterns"
+)
+
+
+dev.off()
+
+
+# Outgoing signaling patterns
+
+png(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_top_pathways_outgoing_heatmap.png"
+  ),
+  width = 9,
+  height = 7,
+  units = "in",
+  res = 400
+)
+
+
+CellChat::netAnalysis_signalingRole_heatmap(
+  cellchat,
+  pattern = "outgoing",
+  signaling = top_pathways,
+  title = "Outgoing signaling patterns"
+)
+
+
+dev.off()
+
+
+#------------------------------------------------------------------------------
+# 9. Global signaling roles
+#------------------------------------------------------------------------------
+
+# Summarize each cell population by its overall incoming and outgoing
+# communication strength.
+
+signaling_role_scatter <- CellChat::netAnalysis_signalingRole_scatter(
+  cellchat
+)
+
+
+print(
+  signaling_role_scatter
+)
+
+
+ggsave(
+  filename = file.path(
+    cellchat_figure_directory,
+    "GSE298688_CellChat_signaling_role_scatter.png"
+  ),
+  plot = signaling_role_scatter,
+  width = 9,
+  height = 7,
+  dpi = 400
+)
+
+
+#------------------------------------------------------------------------------
+# 10. Representative pathway-level signaling networks
+#------------------------------------------------------------------------------
+
+# Visualize representative signaling pathways identified from the global
+# CellChat analysis.
+#
+# ApoE and SELPLG were selected for detailed visualization based on their
+# distinct outgoing signaling patterns in the global pathway heatmap.
+#
+# These plots illustrate:
+#   1. The inferred source-to-target communication structure for each pathway.
+#   2. The relative contribution of individual ligand-receptor interactions
+#      to the pathway-level communication network.
+
+
+# Define representative pathways.
+
+representative_pathways <- c(
+  "ApoE",
+  "SELPLG"
+)
+
+
+# Check which pathways were detected by CellChat.
+
+available_pathways <- cellchat@netP$pathways
+
+missing_representative_pathways <- setdiff(
+  representative_pathways,
+  available_pathways
+)
+
+
+if (length(missing_representative_pathways) > 0) {
+
+  warning(
+    "The following representative pathways were not detected by CellChat: ",
+    paste(
+      missing_representative_pathways,
+      collapse = ", "
+    )
+  )
+}
+
+
+representative_pathways_to_plot <- intersect(
+  representative_pathways,
+  available_pathways
+)
+
+
+message(
+  "Representative pathways available for visualization: ",
+  paste(
+    representative_pathways_to_plot,
+    collapse = ", "
+  )
+)
+
+
+#------------------------------------------------------------------------------
+# 10.1 ApoE signaling network
+#------------------------------------------------------------------------------
+
+if ("ApoE" %in% representative_pathways_to_plot) {
+
+  png(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_ApoE_signaling_network.png"
+    ),
+    width = 8,
+    height = 8,
+    units = "in",
+    res = 400
+  )
+
+
+  CellChat::netVisual_aggregate(
+    cellchat,
+    signaling = "ApoE",
+    layout = "circle"
+  )
+
+
+  dev.off()
+
+
+  message(
+    "Saved ApoE signaling network."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 10.2 ApoE ligand-receptor contribution
+#------------------------------------------------------------------------------
+
+if ("ApoE" %in% representative_pathways_to_plot) {
+
+  apoe_contribution_plot <- CellChat::netAnalysis_contribution(
+    cellchat,
+    signaling = "ApoE"
+  )
+
+
+  print(
+    apoe_contribution_plot
+  )
+
+
+  ggsave(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_ApoE_ligand_receptor_contribution.png"
+    ),
+    plot = apoe_contribution_plot,
+    width = 7,
+    height = 6,
+    dpi = 400
+  )
+
+
+  message(
+    "Saved ApoE ligand-receptor contribution plot."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 10.3 SELPLG signaling network
+#------------------------------------------------------------------------------
+
+if ("SELPLG" %in% representative_pathways_to_plot) {
+
+  png(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_SELPLG_signaling_network.png"
+    ),
+    width = 8,
+    height = 8,
+    units = "in",
+    res = 400
+  )
+
+
+  CellChat::netVisual_aggregate(
+    cellchat,
+    signaling = "SELPLG",
+    layout = "circle"
+  )
+
+
+  dev.off()
+
+
+  message(
+    "Saved SELPLG signaling network."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 10.4 SELPLG ligand-receptor contribution
+#------------------------------------------------------------------------------
+
+if ("SELPLG" %in% representative_pathways_to_plot) {
+
+  selplg_contribution_plot <- CellChat::netAnalysis_contribution(
+    cellchat,
+    signaling = "SELPLG"
+  )
+
+
+  print(
+    selplg_contribution_plot
+  )
+
+
+  ggsave(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_SELPLG_ligand_receptor_contribution.png"
+    ),
+    plot = selplg_contribution_plot,
+    width = 7,
+    height = 6,
+    dpi = 400
+  )
+
+
+  message(
+    "Saved SELPLG ligand-receptor contribution plot."
+  )
+}
+
+#------------------------------------------------------------------------------
+# Representative pathway-level chord diagrams
+#------------------------------------------------------------------------------
+
+# Chord diagrams provide a compact visualization of pathway-specific
+# communication between sending and receiving cell populations.
+
+
+#------------------------------------------------------------------------------
+# ApoE signaling chord diagram
+#------------------------------------------------------------------------------
+
+if ("ApoE" %in% cellchat@netP$pathways) {
+
+  png(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_ApoE_signaling_chord.png"
+    ),
+    width = 8,
+    height = 8,
+    units = "in",
+    res = 400
+  )
+
+  CellChat::netVisual_aggregate(
+    cellchat,
+    signaling = "ApoE",
+    layout = "chord"
+  )
+
+  dev.off()
+
+  message(
+    "Saved ApoE signaling chord diagram."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# SELPLG signaling chord diagram
+#------------------------------------------------------------------------------
+
+if ("SELPLG" %in% cellchat@netP$pathways) {
+
+  png(
+    filename = file.path(
+      cellchat_figure_directory,
+      "GSE298688_CellChat_SELPLG_signaling_chord.png"
+    ),
+    width = 8,
+    height = 8,
+    units = "in",
+    res = 400
+  )
+
+  CellChat::netVisual_aggregate(
+    cellchat,
+    signaling = "SELPLG",
+    layout = "chord"
+  )
+
+  dev.off()
+
+  message(
+    "Saved SELPLG signaling chord diagram."
+  )
+}
+
+#------------------------------------------------------------------------------
+# 11. Save parameters and analysis objects
+#------------------------------------------------------------------------------
+
+cellchat_parameters <- data.frame(
+
+  parameter = c(
+    "annotation_column",
+    "minimum_cells_per_group",
+    "maximum_cells_per_group",
+    "cellchat_database",
+    "communication_mean_type",
+    "communication_trim",
+    "raw_use",
+    "population_size",
+    "distance_use",
+    "top_pathways_visualized",
+    "representative_pathways",
+    "parallel_workers"
+  ),
+
+  value = c(
+    annotation_column,
+    minimum_cells_per_group,
+    maximum_cells_per_group,
+    "CellChatDB.mouse",
+    communication_mean_type,
+    communication_trim,
+    TRUE,
+    FALSE,
+    FALSE,
+    top_n_pathways,
+    paste(
+      representative_pathways,
+      collapse = "; "
+    ),
+    cellchat_workers
+  ),
+
+  stringsAsFactors = FALSE
+)
+
+
+write.csv(
+  cellchat_parameters,
+  file.path(
+    cellchat_results_directory,
+    "GSE298688_CellChat_parameters.csv"
+  ),
+  row.names = FALSE
+)
+
+
+saveRDS(
+  cellchat,
+  cellchat_output_file,
+  compress = TRUE
+)
+
+
+saveRDS(
+  single_cell_cellchat,
+  cellchat_input_seurat_file,
+  compress = TRUE
+)
+
+
+message(
+  "Module 05 complete: ",
+  ncol(single_cell_cellchat),
+  " cells; ",
+  length(final_cell_type_counts),
+  " cell types; ",
+  nrow(communication_table),
+  " ligand-receptor interactions; ",
+  length(cellchat@netP$pathways),
+  " signaling pathways."
+)
+```

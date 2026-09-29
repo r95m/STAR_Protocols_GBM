@@ -1105,6 +1105,54 @@
       "Author": "Julien Racle [aut, cre], David Gfeller [aut]",
       "Maintainer": "Julien Racle <julien.racle@unil.ch>"
     },
+    "EpiDISH": {
+      "Package": "EpiDISH",
+      "Version": "2.28.0",
+      "Source": "Bioconductor",
+      "Title": "Epigenetic Dissection of Intra-Sample-Heterogeneity",
+      "Description": "EpiDISH is a R package to infer the proportions of a priori known cell-types present in a sample representing a mixture of such cell-types. Right now, the package can be used on DNAm  data of blood-tissue of any age, from birth to old-age, generic epithelial tissue and breast tissue. Besides, the package provides a function that allows  the identification of differentially methylated cell-types and their  directionality of change in Epigenome-Wide Association Studies.",
+      "Date": "2026-03-13",
+      "Authors@R": "c(person(\"Andrew E.\", \"Teschendorff\", role=c(\"aut\"), email=\"andrew@picb.ac.cn\"), person(\"Shijie C.\", \"Zheng\", role=c(\"aut\", \"cre\"), email=\"shijieczheng@gmail.com\"))",
+      "Depends": [
+        "R (>= 4.1)"
+      ],
+      "Imports": [
+        "MASS",
+        "e1071",
+        "quadprog",
+        "parallel",
+        "stats",
+        "matrixStats",
+        "stringr",
+        "locfdr",
+        "Matrix",
+        "genefilter"
+      ],
+      "Suggests": [
+        "roxygen2",
+        "GEOquery",
+        "BiocStyle",
+        "knitr",
+        "rmarkdown",
+        "Biobase",
+        "testthat"
+      ],
+      "VignetteBuilder": "knitr",
+      "License": "GPL-2",
+      "LazyData": "true",
+      "RoxygenNote": "7.1.2",
+      "URL": "https://github.com/sjczheng/EpiDISH",
+      "BugReports": "https://github.com/sjczheng/EpiDISH/issues",
+      "biocViews": "DNAMethylation, MethylationArray, Epigenetics, DifferentialMethylation, ImmunoOncology",
+      "git_url": "https://git.bioconductor.org/packages/EpiDISH",
+      "git_branch": "RELEASE_3_23",
+      "git_last_commit": "2574adb",
+      "git_last_commit_date": "2026-04-28",
+      "Repository": "Bioconductor 3.23",
+      "NeedsCompilation": "no",
+      "Author": "Andrew E. Teschendorff [aut], Shijie C. Zheng [aut, cre]",
+      "Maintainer": "Shijie C. Zheng <shijieczheng@gmail.com>"
+    },
     "ExperimentHub": {
       "Package": "ExperimentHub",
       "Version": "3.2.0",
@@ -1188,6 +1236,80 @@
       "NeedsCompilation": "no",
       "Author": "Achim Zeileis [aut, cre] (<https://orcid.org/0000-0003-0918-3766>), Yves Croissant [aut]",
       "Maintainer": "Achim Zeileis <Achim.Zeileis@R-project.org>",
+      "Repository": "CRAN"
+    },
+    "GGally": {
+      "Package": "GGally",
+      "Version": "2.4.0",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Extension to 'ggplot2'",
+      "Authors@R": "c( person(\"Barret\", \"Schloerke\", , \"schloerke@gmail.com\", role = c(\"aut\", \"cre\"), comment = c(ORCID = \"0000-0001-9986-114X\")), person(\"Di\", \"Cook\", , \"dicook@monash.edu\", role = c(\"aut\", \"ths\"), comment = c(ORCID = \"0000-0002-3813-7155\")), person(\"Joseph\", \"Larmarange\", , \"joseph@larmarange.net\", role = \"aut\", comment = c(ORCID = \"0000-0001-7097-700X\")), person(\"Francois\", \"Briatte\", , \"f.briatte@gmail.com\", role = \"aut\"), person(\"Moritz\", \"Marbach\", , \"mmarbach@mail.uni-mannheim.de\", role = \"aut\"), person(\"Edwin\", \"Thoen\", , \"edwinthoen@gmail.com\", role = \"aut\"), person(\"Amos\", \"Elberg\", , \"amos.elberg@gmail.com\", role = \"aut\"), person(\"Ott\", \"Toomet\", , \"otoomet@gmail.com\", role = \"ctb\"), person(\"Jason\", \"Crowley\", , \"crowley.jason.s@gmail.com\", role = \"aut\"), person(\"Heike\", \"Hofmann\", , \"hhofmann4@unl.edu\", role = \"ths\", comment = c(ORCID = \"0000-0001-6216-5183\")), person(\"Hadley\", \"Wickham\", , \"h.wickham@gmail.com\", role = \"ths\", comment = c(ORCID = \"0000-0003-4757-117X\")) )",
+      "Description": "The R package 'ggplot2' is a plotting system based on the grammar of graphics.  'GGally' extends 'ggplot2' by adding several functions to reduce the complexity of combining geometric objects with transformed data.  Some of these functions include a pairwise plot matrix, a two group pairwise plot matrix, a parallel coordinates plot, a survival plot, and several functions to plot networks.",
+      "License": "GPL (>= 2.0)",
+      "URL": "https://ggobi.github.io/ggally/, https://github.com/ggobi/ggally",
+      "BugReports": "https://github.com/ggobi/ggally/issues",
+      "Depends": [
+        "ggplot2 (>= 3.5.2)",
+        "R (>= 4.3)"
+      ],
+      "Imports": [
+        "cli",
+        "dplyr (>= 1.1.0)",
+        "ggstats (>= 0.9.0)",
+        "grDevices",
+        "grid",
+        "gtable (>= 0.2.0)",
+        "lifecycle",
+        "magrittr",
+        "progress",
+        "RColorBrewer",
+        "rlang",
+        "S7 (>= 0.2.0)",
+        "scales (>= 1.3.0)",
+        "tidyr (>= 1.3.0)",
+        "utils"
+      ],
+      "Suggests": [
+        "airports",
+        "broom (>= 0.7.0)",
+        "broom.helpers (>= 1.3.0)",
+        "chemometrics",
+        "crosstalk",
+        "emmeans",
+        "geosphere (>= 1.5-1)",
+        "ggforce",
+        "Hmisc",
+        "igraph (>= 1.0.1)",
+        "intergraph (>= 2.0-2)",
+        "knitr",
+        "labelled",
+        "mapproj",
+        "maps (>= 3.1.0)",
+        "network (>= 1.17.1)",
+        "nnet",
+        "rmarkdown",
+        "scagnostics",
+        "sna (>= 2.3-2)",
+        "spelling",
+        "survival",
+        "testthat (>= 3.0.0)",
+        "vdiffr"
+      ],
+      "RdMacros": "lifecycle",
+      "Config/Needs/website": "tidyverse/tidytemplate",
+      "Config/testthat/edition": "3",
+      "Config/usethis/last-upkeep": "2025-06-13",
+      "Encoding": "UTF-8",
+      "Language": "en-US",
+      "LazyData": "true",
+      "LazyLoad": "yes",
+      "RoxygenNote": "7.3.2",
+      "SystemRequirements": "openssl",
+      "Collate": "'GGally-package.R' 'data-australia-pisa-2012.R' 'data-baseball.R' 'data-flea.R' 'data-happy.R' 'data-nasa.R' 'data-nba_ppg_2008.R' 'data-pigs.R' 'data-psychademic.R' 'data-tips.R' 'data-twitter_spambots.R' 'deprecated.R' 'find-combo.R' 'gg-plots.R' 'ggally_colbar.R' 'ggally_cross.R' 'ggaly_trends.R' 'ggbivariate.R' 'ggcoef.R' 'ggcorr.R' 'ggfacet.R' 'gglyph.R' 'ggpairs_getput.R' 'ggmatrix.R' 'ggmatrix_gtable.R' 'ggmatrix_gtable_helpers.R' 'ggmatrix_legend.R' 'ggmatrix_make_plot.R' 'ggmatrix_print.R' 'ggmatrix_progress.R' 'ggnet.R' 'ggnet2.R' 'ggnetworkmap.R' 'ggnostic.R' 'ggpairs.R' 'ggpairs_add.R' 'ggpairs_internal_plots.R' 'ggparcoord.R' 'ggsave.R' 'ggscatmat.R' 'ggsurv.R' 'ggtable.R' 'reexports.R' 'utils-pipe.R' 'utils.R' 'vig_ggally.R' 'zzz.R'",
+      "NeedsCompilation": "no",
+      "Author": "Barret Schloerke [aut, cre] (ORCID: <https://orcid.org/0000-0001-9986-114X>), Di Cook [aut, ths] (ORCID: <https://orcid.org/0000-0002-3813-7155>), Joseph Larmarange [aut] (ORCID: <https://orcid.org/0000-0001-7097-700X>), Francois Briatte [aut], Moritz Marbach [aut], Edwin Thoen [aut], Amos Elberg [aut], Ott Toomet [ctb], Jason Crowley [aut], Heike Hofmann [ths] (ORCID: <https://orcid.org/0000-0001-6216-5183>), Hadley Wickham [ths] (ORCID: <https://orcid.org/0000-0003-4757-117X>)",
+      "Maintainer": "Barret Schloerke <schloerke@gmail.com>",
       "Repository": "CRAN"
     },
     "GSEABase": {
@@ -1857,6 +1979,43 @@
       "Author": "Douglas Bates [aut] (<https://orcid.org/0000-0001-8316-9503>), Martin Maechler [aut, cre] (<https://orcid.org/0000-0002-8685-9910>)",
       "Maintainer": "Martin Maechler <mmaechler+Matrix@gmail.com>",
       "Repository": "CRAN"
+    },
+    "MuSiC": {
+      "Package": "MuSiC",
+      "Version": "1.0.0",
+      "Source": "GitHub",
+      "Type": "Package",
+      "Title": "Multi-subject single cell deconvolution",
+      "Authors@R": "c(person(\"Xuran\", \"Wang\", role = c('aut', 'cre'), email = 'xuran.wang@mssm.edu'), person(\"Jiaxin\", \"Fan\", role = c('aut'), email = 'Jiaxin.Fan@fda.hhs.gov'))",
+      "Maintainer": "Xuran Wang <xuran.wang@mssm.edu>",
+      "Description": "Companion package to: A bulk tissue deconvolution method with multi-subject single cell expression reference. This package provide functions to estimate bulk tissue cell type proportions with multi-subject single cell expression as reference.",
+      "License": "GPL (>= 3)",
+      "Encoding": "UTF-8",
+      "Depends": [
+        "R (>= 3.3.2)",
+        "nnls (>= 1.4)",
+        "ggplot2 (>= 2.2.1)",
+        "TOAST (>= 1.10.1)"
+      ],
+      "Imports": [
+        "Biobase",
+        "SingleCellExperiment",
+        "Matrix",
+        "MCMCpack"
+      ],
+      "URL": "https://github.com/xuranw/MuSiC",
+      "BugReports": "https://github.com/xuranw/MuSiC/issues",
+      "VignetteBuilder": "knitr",
+      "RoxygenNote": "7.2.1",
+      "Remotes": "",
+      "RemoteType": "github",
+      "RemoteHost": "api.github.com",
+      "RemoteRepo": "MuSiC",
+      "RemoteUsername": "xuranw",
+      "RemoteRef": "HEAD",
+      "RemoteSha": "f21fe67f5670d5e9fca0ad7550abaae3423eb59c",
+      "NeedsCompilation": "no",
+      "Author": "Xuran Wang [aut, cre], Jiaxin Fan [aut]"
     },
     "NMF": {
       "Package": "NMF",
@@ -3227,6 +3386,54 @@
       "Author": "Torsten Hothorn [aut, cre]",
       "Maintainer": "Torsten Hothorn <Torsten.Hothorn@R-project.org>",
       "Repository": "CRAN"
+    },
+    "TOAST": {
+      "Package": "TOAST",
+      "Version": "1.26.0",
+      "Source": "Bioconductor",
+      "Type": "Package",
+      "Title": "Tools for the analysis of heterogeneous tissues",
+      "Description": "This package is devoted to analyzing high-throughput data (e.g. gene expression microarray, DNA methylation microarray, RNA-seq) from complex tissues. Current functionalities include 1. detect cell-type specific or cross-cell type differential signals 2. tree-based differential analysis  3. improve variable selection in reference-free deconvolution 4. partial reference-free deconvolution with prior knowledge.",
+      "Author": "Ziyi Li and Weiwei Zhang and Luxiao Chen and Hao Wu",
+      "Maintainer": "Ziyi Li <zli16@mdanderson.org>",
+      "License": "GPL-2",
+      "Encoding": "UTF-8",
+      "LazyData": "false",
+      "Depends": [
+        "R (>= 3.6)",
+        "EpiDISH",
+        "limma",
+        "nnls",
+        "quadprog"
+      ],
+      "biocViews": "DNAMethylation, GeneExpression, DifferentialExpression, DifferentialMethylation, Microarray, GeneTarget, Epigenetics, MethylationArray",
+      "BugReports": "https://github.com/ziyili20/TOAST/issues",
+      "Imports": [
+        "stats",
+        "methods",
+        "SummarizedExperiment",
+        "corpcor",
+        "doParallel",
+        "parallel",
+        "ggplot2",
+        "tidyr",
+        "GGally"
+      ],
+      "Suggests": [
+        "BiocStyle",
+        "knitr",
+        "rmarkdown",
+        "gplots",
+        "matrixStats",
+        "Matrix"
+      ],
+      "VignetteBuilder": "knitr",
+      "NeedsCompilation": "no",
+      "git_url": "https://git.bioconductor.org/packages/TOAST",
+      "git_branch": "RELEASE_3_23",
+      "git_last_commit": "b38dcc6",
+      "git_last_commit_date": "2026-04-28",
+      "Repository": "Bioconductor 3.23"
     },
     "UCSCXenaTools": {
       "Package": "UCSCXenaTools",
@@ -5069,6 +5276,27 @@
       "Maintainer": "Joël Gombin <joel.gombin@gmail.com>",
       "Repository": "CRAN"
     },
+    "corpcor": {
+      "Package": "corpcor",
+      "Version": "1.6.10",
+      "Source": "Repository",
+      "Date": "2021-09-16",
+      "Title": "Efficient Estimation of Covariance and (Partial) Correlation",
+      "Author": "Juliane Schafer, Rainer Opgen-Rhein, Verena Zuber, Miika Ahdesmaki,  A. Pedro Duarte Silva, and Korbinian Strimmer.",
+      "Maintainer": "Korbinian Strimmer <strimmerlab@gmail.com>",
+      "Depends": [
+        "R (>= 3.0.2)"
+      ],
+      "Imports": [
+        "stats"
+      ],
+      "Suggests": [],
+      "Description": "Implements a James-Stein-type shrinkage estimator for  the covariance matrix, with separate shrinkage for variances and correlations.   The details of the method are explained in Schafer and Strimmer (2005)  <DOI:10.2202/1544-6115.1175> and Opgen-Rhein and Strimmer (2007)  <DOI:10.2202/1544-6115.1252>.  The approach is both computationally as well as statistically very efficient, it is applicable to \"small n, large p\" data,  and always returns a positive definite and well-conditioned covariance matrix.   In addition to inferring the covariance matrix the package also provides  shrinkage estimators for partial correlations and partial variances.   The inverse of the covariance and correlation matrix  can be efficiently computed, as well as any arbitrary power of the  shrinkage correlation matrix.  Furthermore, functions are available for fast  singular value decomposition, for computing the pseudoinverse, and for  checking the rank and positive definiteness of a matrix.",
+      "License": "GPL (>= 3)",
+      "URL": "https://strimmerlab.github.io/software/corpcor/",
+      "NeedsCompilation": "no",
+      "Repository": "CRAN"
+    },
     "corrplot": {
       "Package": "corrplot",
       "Version": "0.95",
@@ -6212,6 +6440,48 @@
       "Maintainer": "Richard Iannone <rich@posit.co>",
       "Repository": "CRAN"
     },
+    "forcats": {
+      "Package": "forcats",
+      "Version": "1.0.1",
+      "Source": "Repository",
+      "Title": "Tools for Working with Categorical Variables (Factors)",
+      "Authors@R": "c( person(\"Hadley\", \"Wickham\", , \"hadley@posit.co\", role = c(\"aut\", \"cre\")), person(\"Posit Software, PBC\", role = c(\"cph\", \"fnd\"), comment = c(ROR = \"03wc8by49\")) )",
+      "Description": "Helpers for reordering factor levels (including moving specified levels to front, ordering by first appearance, reversing, and randomly shuffling), and tools for modifying factor levels (including collapsing rare levels into other, 'anonymising', and manually 'recoding').",
+      "License": "MIT + file LICENSE",
+      "URL": "https://forcats.tidyverse.org/, https://github.com/tidyverse/forcats",
+      "BugReports": "https://github.com/tidyverse/forcats/issues",
+      "Depends": [
+        "R (>= 4.1)"
+      ],
+      "Imports": [
+        "cli (>= 3.4.0)",
+        "glue",
+        "lifecycle",
+        "magrittr",
+        "rlang (>= 1.0.0)",
+        "tibble"
+      ],
+      "Suggests": [
+        "covr",
+        "dplyr",
+        "ggplot2",
+        "knitr",
+        "readr",
+        "rmarkdown",
+        "testthat (>= 3.0.0)",
+        "withr"
+      ],
+      "VignetteBuilder": "knitr",
+      "Config/Needs/website": "tidyverse/tidytemplate",
+      "Config/testthat/edition": "3",
+      "Encoding": "UTF-8",
+      "LazyData": "true",
+      "RoxygenNote": "7.3.3",
+      "NeedsCompilation": "no",
+      "Author": "Hadley Wickham [aut, cre], Posit Software, PBC [cph, fnd] (ROR: <https://ror.org/03wc8by49>)",
+      "Maintainer": "Hadley Wickham <hadley@posit.co>",
+      "Repository": "CRAN"
+    },
     "foreach": {
       "Package": "foreach",
       "Version": "1.5.2",
@@ -7105,6 +7375,65 @@
       "Maintainer": "Constantin Ahlmann-Eltze <artjom31415@googlemail.com>",
       "Repository": "CRAN"
     },
+    "ggstats": {
+      "Package": "ggstats",
+      "Version": "0.13.0",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Extension to 'ggplot2' for Plotting Stats",
+      "Authors@R": "c( person( \"Joseph\", \"Larmarange\", , \"joseph@larmarange.net\", role = c(\"aut\", \"cre\"), comment = c(ORCID = \"0000-0001-7097-700X\") ) )",
+      "Description": "Provides new statistics, new geometries and new positions for  'ggplot2' and a suite of functions to facilitate the creation of  statistical plots.",
+      "License": "GPL (>= 3)",
+      "URL": "https://larmarange.github.io/ggstats/, https://github.com/larmarange/ggstats",
+      "BugReports": "https://github.com/larmarange/ggstats/issues",
+      "Depends": [
+        "R (>= 4.2)"
+      ],
+      "Imports": [
+        "cli",
+        "dplyr",
+        "forcats",
+        "ggplot2 (>= 4.0.0)",
+        "lifecycle",
+        "patchwork",
+        "purrr",
+        "rlang",
+        "scales",
+        "stats",
+        "stringr",
+        "utils",
+        "tidyr"
+      ],
+      "Suggests": [
+        "betareg",
+        "broom",
+        "broom.helpers (>= 1.20.0)",
+        "emmeans",
+        "glue",
+        "gtsummary",
+        "knitr",
+        "labelled (>= 2.11.0)",
+        "reshape",
+        "rmarkdown",
+        "nnet",
+        "parameters",
+        "pscl",
+        "testthat (>= 3.0.0)",
+        "spelling",
+        "survey",
+        "survival",
+        "vdiffr"
+      ],
+      "Encoding": "UTF-8",
+      "RoxygenNote": "7.3.3",
+      "Config/testthat/edition": "3",
+      "Language": "en-US",
+      "VignetteBuilder": "knitr",
+      "NeedsCompilation": "no",
+      "Author": "Joseph Larmarange [aut, cre] (ORCID: <https://orcid.org/0000-0001-7097-700X>)",
+      "Maintainer": "Joseph Larmarange <joseph@larmarange.net>",
+      "Repository": "CRAN"
+    },
     "ggtext": {
       "Package": "ggtext",
       "Version": "0.1.2",
@@ -7672,6 +8001,45 @@
       "NeedsCompilation": "yes",
       "Author": "Nikolaos Patikas [aut, ctb] (ORCID: <https://orcid.org/0000-0002-3978-0134>), Hongcheng Yao [aut, ctb] (ORCID: <https://orcid.org/0000-0002-0743-4835>), Ilya Korsunsky [cre, aut] (ORCID: <https://orcid.org/0000-0003-4848-3948>), Martin Hemberg [aut] (ORCID: <https://orcid.org/0000-0001-8895-5239>), Nghia Millard [aut] (ORCID: <https://orcid.org/0000-0002-0518-7674>), Jean Fan [aut, ctb] (ORCID: <https://orcid.org/0000-0002-0212-5451>), Kamil Slowikowski [aut, ctb] (ORCID: <https://orcid.org/0000-0002-2843-6370>), Miles Smith [ctb], Soumya Raychaudhuri [aut] (ORCID: <https://orcid.org/0000-0002-1901-8265>)",
       "Maintainer": "Ilya Korsunsky <ilya.korsunsky@gmail.com>",
+      "Repository": "CRAN"
+    },
+    "hdf5r": {
+      "Package": "hdf5r",
+      "Version": "1.3.16",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Interface to the 'HDF5' Binary Data Format",
+      "Authors@R": "c( person(\"Holger\", \"Hoefling\", email = \"hhoeflin@gmail.com\", role = c(\"aut\", \"cre\")), person(\"Mario\", \"Annau\", email = \"mario.annau@gmail.com\", role = \"aut\"), person(\"Novartis Institute for BioMedical Research (NIBR)\", role = \"cph\") )",
+      "Description": "'HDF5' is a data model, library and file format for storing and managing large amounts of data. This package provides a nearly feature complete, object oriented  wrapper for the 'HDF5' API <https://support.hdfgroup.org/documentation/hdf5/latest/_r_m.html> using R6 classes. Additionally, functionality is added so that 'HDF5' objects behave very similar to their corresponding R counterparts.",
+      "URL": "https://hhoeflin.github.io/hdf5r/, https://github.com/hhoeflin/hdf5r/",
+      "BugReports": "https://github.com/hhoeflin/hdf5r/issues",
+      "License": "Apache License 2.0 | file LICENSE",
+      "Copyright": "For the hdf5r package: Novartis Institute for BioMedical Research Inc. For HDF5: see the HDF5_COPYRIGHTS file.",
+      "LazyLoad": "true",
+      "Depends": [
+        "R (>= 3.2.2)",
+        "methods"
+      ],
+      "Imports": [
+        "R6",
+        "bit64",
+        "utils"
+      ],
+      "Suggests": [
+        "testthat",
+        "knitr",
+        "rmarkdown",
+        "nycflights13",
+        "reshape2",
+        "formatR"
+      ],
+      "SystemRequirements": "HDF5 (>= 1.8.13)",
+      "VignetteBuilder": "knitr",
+      "NeedsCompilation": "yes",
+      "RoxygenNote": "6.1.1.9000",
+      "Collate": "'Common_functions.R' 'Compound.R' 'H5constants.R' 'Helper_functions.R' 'Misc.R' 'R6Classes.R' 'R6Classes_H5A.R' 'R6Classes_H5D.R' 'R6Classes_H5File.R' 'R6Classes_H5Group.R' 'R6Classes_H5P.R' 'R6Classes_H5R.R' 'R6Classes_H5S.R' 'R6Classes_H5T.R' 'adapt_during_onLoad.R' 'convert.R' 'factor_ext.R' 'globalVariables.R' 'h5errorHandling.R' 'h5wrapper.R' 'hdf5r.R' 'high_level_UI.R' 'open_objs.R' 'zzz.R'",
+      "Author": "Holger Hoefling [aut, cre], Mario Annau [aut], Novartis Institute for BioMedical Research (NIBR) [cph]",
+      "Maintainer": "Holger Hoefling <hhoeflin@gmail.com>",
       "Repository": "CRAN"
     },
     "here": {
@@ -8951,6 +9319,24 @@
       "NeedsCompilation": "yes",
       "Author": "Torsten Hothorn [aut] (<https://orcid.org/0000-0001-8301-0471>), Achim Zeileis [aut, cre] (<https://orcid.org/0000-0003-0918-3766>), Richard W. Farebrother [aut] (pan.f), Clint Cummins [aut] (pan.f), Giovanni Millo [ctb], David Mitchell [ctb]",
       "Maintainer": "Achim Zeileis <Achim.Zeileis@R-project.org>",
+      "Repository": "CRAN"
+    },
+    "locfdr": {
+      "Package": "locfdr",
+      "Version": "1.1-8",
+      "Source": "Repository",
+      "Title": "Computes Local False Discovery Rates",
+      "Authors@R": "c(person(\"Bradley\", \"Efron\", role=c(\"aut\"), email = \"brad@stat.Stanford.EDU\"), person(\"Brit\", \"Turnbull\", role=c(\"aut\")), person(\"Balasubramanian\", \"Narasimhan\", role=c(\"aut\", \"cre\"), email = \"naras@stat.Stanford.EDU\"), person(\"Korbinian\", \"Strimmer\", role=c(\"ctb\")))",
+      "Maintainer": "Balasubramanian Narasimhan <naras@stat.Stanford.EDU>",
+      "License": "GPL-2",
+      "Imports": [
+        "stats",
+        "splines",
+        "graphics"
+      ],
+      "Description": "Computation of local false discovery rates.",
+      "NeedsCompilation": "no",
+      "Author": "Bradley Efron [aut], Brit Turnbull [aut], Balasubramanian Narasimhan [aut, cre], Korbinian Strimmer [ctb]",
       "Repository": "CRAN"
     },
     "locfit": {
@@ -11169,6 +11555,29 @@
       "NeedsCompilation": "yes",
       "Author": "Mike Smith [aut, ccp] (ORCID: <https://orcid.org/0000-0002-7800-3848>), Hugo Gruson [cre] (ORCID: <https://orcid.org/0000-0002-4094-1476>)",
       "Maintainer": "Hugo Gruson <hugo.gruson@embl.de>"
+    },
+    "rjags": {
+      "Package": "rjags",
+      "Version": "4-17",
+      "Source": "Repository",
+      "Date": "2025-03-24",
+      "Title": "Bayesian Graphical Models using MCMC",
+      "Authors@R": "c(person(\"Martyn\", \"Plummer\", role=c(\"aut\",\"cre\"), email=\"martyn.plummer@gmail.com\"), person(\"Alexey\", \"Stukalov\", role=\"ctb\"), person(\"Matt\", \"Denwood\", role=\"ctb\"))",
+      "Depends": [
+        "R (>= 2.14.0)",
+        "coda (>= 0.13)"
+      ],
+      "SystemRequirements": "JAGS 4.x.y",
+      "URL": "https://mcmc-jags.sourceforge.io",
+      "Suggests": [
+        "tcltk"
+      ],
+      "Description": "Interface to the JAGS MCMC library.",
+      "License": "GPL (== 2)",
+      "NeedsCompilation": "yes",
+      "Author": "Martyn Plummer [aut, cre], Alexey Stukalov [ctb], Matt Denwood [ctb]",
+      "Maintainer": "Martyn Plummer <martyn.plummer@gmail.com>",
+      "Repository": "CRAN"
     },
     "rjson": {
       "Package": "rjson",

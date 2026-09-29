@@ -1,0 +1,693 @@
+---
+title: "Module 02: Single-cell RNA-seq quality control and filtering"
+output: html_document
+date: "2026-08-06"
+---
+
+```{r}
+
+#==============================================================================
+# MODULE 02 — Single-cell RNA-seq quality control and filtering
+#==============================================================================
+
+# Purpose:
+#   Examine cell-level QC metrics, evaluate candidate filtering thresholds,
+#   apply selected QC thresholds, assess cell retention, and save the
+#   QC-filtered Seurat object for downstream analysis.
+#
+# Input:
+#   data/processed/single_cell/GSE298688_merged_raw_seurat.rds
+#
+# Outputs:
+#   data/processed/single_cell/GSE298688_QC_filtered_seurat.rds
+#   results/single_cell/qc/
+#   figures/single_cell/qc/
+#
+# Selected filtering thresholds:
+#   nFeature_RNA >= 300
+#   nFeature_RNA <= 5000
+#   percent.mt <= 20
+#
+# No normalization, dimensionality reduction, clustering, integration,
+# or cell-type annotation is performed in this module.
+
+
+#------------------------------------------------------------------------------
+# 1. Setup
+#------------------------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(patchwork)
+  library(dplyr)
+  library(here)
+})
+
+set.seed(1234)
+
+processed_directory <- here::here(
+  "data",
+  "processed",
+  "single_cell"
+)
+
+results_directory <- here::here(
+  "results",
+  "single_cell",
+  "qc"
+)
+
+figure_directory <- here::here(
+  "figures",
+  "single_cell",
+  "qc"
+)
+
+dir.create(
+  results_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  figure_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+input_file <- file.path(
+  processed_directory,
+  "GSE298688_merged_raw_seurat.rds"
+)
+
+output_file <- file.path(
+  processed_directory,
+  "GSE298688_QC_filtered_seurat.rds"
+)
+
+if (!file.exists(input_file)) {
+  stop(
+    "Module 01 output not found: ",
+    input_file
+  )
+}
+
+message("Loading merged single-cell object...")
+
+single_cell <- readRDS(input_file)
+
+DefaultAssay(single_cell) <- "RNA"
+
+message(
+  "Loaded: ",
+  nrow(single_cell),
+  " genes x ",
+  ncol(single_cell),
+  " cells"
+)
+
+
+#------------------------------------------------------------------------------
+# 2. Calculate and inspect QC metrics
+#------------------------------------------------------------------------------
+
+# Recalculate mitochondrial transcript percentage using mouse gene names.
+
+mitochondrial_genes <- grep(
+  "^mt-",
+  rownames(single_cell),
+  value = TRUE
+)
+
+if (length(mitochondrial_genes) == 0) {
+  warning(
+    "No mitochondrial genes matched '^mt-'. ",
+    "Confirm the gene naming convention."
+  )
+}
+
+single_cell[["percent.mt"]] <- PercentageFeatureSet(
+  single_cell,
+  pattern = "^mt-"
+)
+
+
+# Confirm that metadata required for QC is available.
+
+required_columns <- c(
+  "sample",
+  "condition",
+  "nCount_RNA",
+  "nFeature_RNA",
+  "percent.mt"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(single_cell@meta.data)
+)
+
+if (length(missing_columns) > 0) {
+  stop(
+    "Missing required metadata: ",
+    paste(missing_columns, collapse = ", ")
+  )
+}
+
+if (
+  any(
+    is.na(
+      single_cell@meta.data[, required_columns]
+    )
+  )
+) {
+  stop(
+    "Missing values detected in required QC metadata."
+  )
+}
+
+
+# Overall QC distributions before filtering.
+
+print(
+  summary(
+    single_cell@meta.data[
+      ,
+      c(
+        "nCount_RNA",
+        "nFeature_RNA",
+        "percent.mt"
+      )
+    ]
+  )
+)
+
+
+# Sample-level QC summary before filtering.
+
+qc_summary_before <- single_cell@meta.data %>%
+  group_by(
+    sample,
+    condition
+  ) %>%
+  summarise(
+    cells = n(),
+    median_counts = median(nCount_RNA),
+    median_features = median(nFeature_RNA),
+    median_percent_mt = median(percent.mt),
+    mean_counts = mean(nCount_RNA),
+    mean_features = mean(nFeature_RNA),
+    mean_percent_mt = mean(percent.mt),
+    .groups = "drop"
+  )
+
+print(qc_summary_before)
+
+write.csv(
+  qc_summary_before,
+  file.path(
+    results_directory,
+    "QC_summary_before_filtering.csv"
+  ),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 3. Plot QC metrics before filtering
+#------------------------------------------------------------------------------
+
+qc_violin_before <- VlnPlot(
+  single_cell,
+  features = c(
+    "nFeature_RNA",
+    "nCount_RNA",
+    "percent.mt"
+  ),
+  group.by = "sample",
+  ncol = 3,
+  pt.size = 0
+)
+
+print(qc_violin_before)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_violin_before_filtering.png"
+  ),
+  plot = qc_violin_before,
+  width = 12,
+  height = 5,
+  dpi = 300
+)
+
+
+count_feature_before <- FeatureScatter(
+  single_cell,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA",
+  group.by = "sample"
+)
+
+print(count_feature_before)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_counts_vs_features_before_filtering.png"
+  ),
+  plot = count_feature_before,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+count_mt_before <- FeatureScatter(
+  single_cell,
+  feature1 = "nCount_RNA",
+  feature2 = "percent.mt",
+  group.by = "sample"
+)
+
+print(count_mt_before)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_counts_vs_mt_before_filtering.png"
+  ),
+  plot = count_mt_before,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+feature_mt_before <- FeatureScatter(
+  single_cell,
+  feature1 = "nFeature_RNA",
+  feature2 = "percent.mt",
+  group.by = "sample"
+)
+
+print(feature_mt_before)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_features_vs_mt_before_filtering.png"
+  ),
+  plot = feature_mt_before,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 4. Evaluate candidate QC thresholds
+#------------------------------------------------------------------------------
+
+# Summarize the number and percentage of cells that would be removed
+# across candidate gene and mitochondrial thresholds.
+
+qc_threshold_summary <- single_cell@meta.data %>%
+  group_by(sample) %>%
+  summarise(
+    total_cells = n(),
+    features_below_300 = sum(nFeature_RNA < 300),
+    features_above_5000 = sum(nFeature_RNA > 5000),
+    mt_above_10 = sum(percent.mt > 10),
+    mt_above_15 = sum(percent.mt > 15),
+    mt_above_20 = sum(percent.mt > 20),
+    mt_above_25 = sum(percent.mt > 25),
+    .groups = "drop"
+  )
+
+
+qc_threshold_percent <- single_cell@meta.data %>%
+  group_by(sample) %>%
+  summarise(
+    total_cells = n(),
+    percent_below_300_features =
+      mean(nFeature_RNA < 300) * 100,
+    percent_above_5000_features =
+      mean(nFeature_RNA > 5000) * 100,
+    percent_mt_above_10 =
+      mean(percent.mt > 10) * 100,
+    percent_mt_above_15 =
+      mean(percent.mt > 15) * 100,
+    percent_mt_above_20 =
+      mean(percent.mt > 20) * 100,
+    percent_mt_above_25 =
+      mean(percent.mt > 25) * 100,
+    .groups = "drop"
+  )
+
+print(qc_threshold_summary)
+print(qc_threshold_percent)
+
+
+write.csv(
+  qc_threshold_summary,
+  file.path(
+    results_directory,
+    "QC_candidate_threshold_counts.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  qc_threshold_percent,
+  file.path(
+    results_directory,
+    "QC_candidate_threshold_percentages.csv"
+  ),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Apply selected QC thresholds
+#------------------------------------------------------------------------------
+
+min_features <- 300
+max_features <- 5000
+max_percent_mt <- 20
+
+message(
+  "Applying QC thresholds: ",
+  min_features,
+  " <= nFeature_RNA <= ",
+  max_features,
+  "; percent.mt <= ",
+  max_percent_mt,
+  "%"
+)
+
+
+# Estimate cell retention before filtering.
+
+qc_retention_expected <- single_cell@meta.data %>%
+  group_by(
+    sample,
+    condition
+  ) %>%
+  summarise(
+    cells_before = n(),
+    cells_retained = sum(
+      nFeature_RNA >= min_features &
+        nFeature_RNA <= max_features &
+        percent.mt <= max_percent_mt
+    ),
+    cells_removed =
+      cells_before - cells_retained,
+    percent_retained =
+      100 * cells_retained / cells_before,
+    .groups = "drop"
+  )
+
+print(qc_retention_expected)
+
+
+# Apply the selected thresholds.
+
+single_cell_qc <- subset(
+  single_cell,
+  subset =
+    nFeature_RNA >= min_features &
+    nFeature_RNA <= max_features &
+    percent.mt <= max_percent_mt
+)
+
+if (ncol(single_cell_qc) == 0) {
+  stop(
+    "QC filtering removed all cells."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 6. Summarize filtering results
+#------------------------------------------------------------------------------
+
+cells_before <- single_cell@meta.data %>%
+  count(
+    sample,
+    condition,
+    name = "cells_before"
+  )
+
+cells_after <- single_cell_qc@meta.data %>%
+  count(
+    sample,
+    condition,
+    name = "cells_after"
+  )
+
+qc_filter_summary <- cells_before %>%
+  left_join(
+    cells_after,
+    by = c(
+      "sample",
+      "condition"
+    )
+  ) %>%
+  mutate(
+    cells_after = ifelse(
+      is.na(cells_after),
+      0,
+      cells_after
+    ),
+    cells_removed =
+      cells_before - cells_after,
+    percent_retained =
+      100 * cells_after / cells_before
+  )
+
+print(qc_filter_summary)
+
+
+# Confirm that all input samples remain after filtering.
+
+expected_samples <- sort(
+  unique(single_cell$sample)
+)
+
+observed_samples <- sort(
+  unique(single_cell_qc$sample)
+)
+
+if (!identical(
+  expected_samples,
+  observed_samples
+)) {
+  stop(
+    "One or more samples were lost during QC filtering. ",
+    "Samples retained: ",
+    paste(observed_samples, collapse = ", ")
+  )
+}
+
+
+# Confirm that all retained cells satisfy the selected thresholds.
+
+if (
+  any(single_cell_qc$nFeature_RNA < min_features) ||
+  any(single_cell_qc$nFeature_RNA > max_features) ||
+  any(single_cell_qc$percent.mt > max_percent_mt)
+) {
+  stop(
+    "QC-filtered object contains cells outside the selected thresholds."
+  )
+}
+
+
+# Calculate QC summary after filtering.
+
+print(
+  summary(
+    single_cell_qc@meta.data[
+      ,
+      c(
+        "nCount_RNA",
+        "nFeature_RNA",
+        "percent.mt"
+      )
+    ]
+  )
+)
+
+qc_summary_after <- single_cell_qc@meta.data %>%
+  group_by(
+    sample,
+    condition
+  ) %>%
+  summarise(
+    cells = n(),
+    median_counts = median(nCount_RNA),
+    median_features = median(nFeature_RNA),
+    median_percent_mt = median(percent.mt),
+    mean_counts = mean(nCount_RNA),
+    mean_features = mean(nFeature_RNA),
+    mean_percent_mt = mean(percent.mt),
+    .groups = "drop"
+  )
+
+print(qc_summary_after)
+
+
+# Save filtering summaries.
+
+write.csv(
+  qc_summary_after,
+  file.path(
+    results_directory,
+    "QC_summary_after_filtering.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  qc_filter_summary,
+  file.path(
+    results_directory,
+    "QC_filtering_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  qc_retention_expected,
+  file.path(
+    results_directory,
+    "QC_expected_retention.csv"
+  ),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 7. Plot QC metrics after filtering
+#------------------------------------------------------------------------------
+
+qc_violin_after <- VlnPlot(
+  single_cell_qc,
+  features = c(
+    "nFeature_RNA",
+    "nCount_RNA",
+    "percent.mt"
+  ),
+  group.by = "sample",
+  ncol = 3,
+  pt.size = 0
+)
+
+print(qc_violin_after)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_violin_after_filtering.png"
+  ),
+  plot = qc_violin_after,
+  width = 12,
+  height = 5,
+  dpi = 300
+)
+
+
+count_feature_after <- FeatureScatter(
+  single_cell_qc,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA",
+  group.by = "sample"
+)
+
+print(count_feature_after)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_counts_vs_features_after_filtering.png"
+  ),
+  plot = count_feature_after,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+count_mt_after <- FeatureScatter(
+  single_cell_qc,
+  feature1 = "nCount_RNA",
+  feature2 = "percent.mt",
+  group.by = "sample"
+)
+
+print(count_mt_after)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_counts_vs_mt_after_filtering.png"
+  ),
+  plot = count_mt_after,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+feature_mt_after <- FeatureScatter(
+  single_cell_qc,
+  feature1 = "nFeature_RNA",
+  feature2 = "percent.mt",
+  group.by = "sample"
+)
+
+print(feature_mt_after)
+
+ggsave(
+  filename = file.path(
+    figure_directory,
+    "QC_features_vs_mt_after_filtering.png"
+  ),
+  plot = feature_mt_after,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------------------------
+# 8. Save QC-filtered object
+#------------------------------------------------------------------------------
+
+saveRDS(
+  single_cell_qc,
+  output_file
+)
+
+message(
+  "Module 02 complete: ",
+  ncol(single_cell),
+  " cells before QC; ",
+  ncol(single_cell_qc),
+  " cells retained (",
+  round(
+    100 * ncol(single_cell_qc) / ncol(single_cell),
+    1
+  ),
+  "%)."
+)
+
+message(
+  "Saved QC-filtered object: ",
+  output_file
+)
+
+```

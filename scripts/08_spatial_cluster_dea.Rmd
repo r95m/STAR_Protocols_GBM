@@ -6,37 +6,28 @@ date: "2026-08-11"
 
 ```{r}
 #==============================================================================
-# MODULE 08 — Spatial Seurat cluster differential expression analysis
+# MODULE 08 — Spatial cluster differential expression analysis
 #==============================================================================
 
 # Purpose:
-#   Perform differential expression analysis between Harmony-derived spatial
-#   Seurat clusters generated in Module 07. Identify cluster-enriched and
-#   cluster-depleted genes, apply predefined statistical thresholds, export
-#   complete and significant marker tables, summarize differential expression
-#   results, select top positive markers, generate a cluster-marker heatmap,
-#   produce professional volcano plots for every spatial cluster, visualize
-#   Prkcd expression across the integrated spatial dataset, validate all
-#   outputs, and preserve the integrated Seurat object for downstream
-#   inferCNV analysis.
+#   Identify genes enriched or depleted across Harmony-derived spatial
+#   clusters, summarize significant differential expression, visualize
+#   cluster markers, and examine Prkcd expression across the spatial dataset.
 #
 # Input:
 #   data/processed/spatial/
 #     spatial_integrated_clustered_seurat.rds
 #
-# Primary analysis outputs:
+# Outputs:
 #   results/spatial/cluster_dea/
-#
-# Output figures:
 #   figures/spatial/cluster_dea/
-#   figures/spatial/cluster_dea/volcano_plots/
 #
-# Differential expression settings:
+# Differential expression:
 #   Assay:                       SCT
 #   Identity:                    spatial_cluster
 #   Test:                        Wilcoxon rank-sum test
 #   Minimum detection fraction: 0.10
-#   FindAllMarkers log2FC:       0.25
+#   Testing log2FC threshold:    0.25
 #
 # Significant DEG definition:
 #   adjusted P < 0.05
@@ -44,17 +35,13 @@ date: "2026-08-11"
 #
 # Notes:
 #   - Each cluster is compared against all remaining spatial spots.
-#   - The 0.58 log2FC reporting threshold corresponds approximately to
-#     a 1.5-fold expression difference.
-#   - Differential expression is performed on the SCT assay.
-#   - The raw Spatial assay is not modified.
-#   - Malignant versus non-malignant differential expression is performed
-#     later after inferCNV-based classification.
-#==============================================================================
+#   - 0.58 log2FC corresponds approximately to a 1.5-fold difference.
+#   - Raw Spatial counts are not modified.
+#   - Malignant versus non-malignant DEA is performed after inferCNV.
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -67,42 +54,29 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
-
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
+# Analysis parameters
 
 dea_assay <- "SCT"
 
 cluster_column <- "spatial_cluster"
 
 marker_test <- "wilcox"
-
 marker_min_pct <- 0.10
-
 marker_test_log2fc_threshold <- 0.25
 
 significant_log2fc_threshold <- 0.58
-
 adjusted_p_threshold <- 0.05
 
 top_markers_per_cluster <- 10
-
 volcano_labels_per_cluster <- 10
 
 gene_of_interest <- "Prkcd"
 
 
-#------------------------------------------------------------------------------
-# 4. Define repository paths
-#------------------------------------------------------------------------------
+# Repository paths
 
 processed_directory <- here::here(
   "data",
@@ -116,10 +90,8 @@ results_directory <- here::here(
   "cluster_dea"
 )
 
-cluster_table_directory <- here::here(
-  "results",
-  "spatial",
-  "cluster_dea",
+cluster_table_directory <- file.path(
+  results_directory,
   "cluster_tables"
 )
 
@@ -129,21 +101,19 @@ figure_directory <- here::here(
   "cluster_dea"
 )
 
-volcano_directory <- here::here(
-  "figures",
-  "spatial",
-  "cluster_dea",
+volcano_directory <- file.path(
+  figure_directory,
   "volcano_plots"
 )
 
-directories_to_create <- c(
+
+for (directory in c(
   results_directory,
   cluster_table_directory,
   figure_directory,
   volcano_directory
-)
+)) {
 
-for (directory in directories_to_create) {
   dir.create(
     directory,
     recursive = TRUE,
@@ -151,107 +121,63 @@ for (directory in directories_to_create) {
   )
 }
 
+
 input_file <- file.path(
   processed_directory,
   "spatial_integrated_clustered_seurat.rds"
 )
 
-cat(
-  "\n============================================================\n",
-  "MODULE 08 — Spatial cluster differential expression analysis\n",
-  "============================================================\n",
-  "Repository root:    ", here::here(), "\n",
-  "Input object:       ", input_file, "\n",
-  "Results directory: ", results_directory, "\n",
-  "Figure directory:  ", figure_directory, "\n",
-  "Volcano directory: ", volcano_directory, "\n",
-  "============================================================\n\n",
-  sep = ""
-)
-
 
 #------------------------------------------------------------------------------
-# 5. Validate and load Module 07 output
+# 2. Load and prepare spatial object
 #------------------------------------------------------------------------------
 
 if (!file.exists(input_file)) {
+
   stop(
-    "Module 07 output was not found:\n",
-    input_file,
-    "\n\nRun 07_spatial_normalization_clustering.Rmd before Module 08."
+    "Module 07 output not found: ",
+    input_file
   )
 }
 
-cat(
-  "Loading integrated spatial Seurat object...\n"
+
+message(
+  "Loading processed spatial object..."
 )
+
 
 spatial_object <- readRDS(
   input_file
 )
 
-if (!inherits(spatial_object, "Seurat")) {
+
+if (!dea_assay %in% Seurat::Assays(spatial_object)) {
+
   stop(
-    "Loaded input file is not a valid Seurat object."
+    "Required assay not found: ",
+    dea_assay
   )
 }
 
-available_assays <- names(
-  spatial_object@assays
-)
-
-if (!dea_assay %in% available_assays) {
-  stop(
-    "Required DEA assay was not found: ",
-    dea_assay,
-    "\nAvailable assays: ",
-    paste(
-      available_assays,
-      collapse = ", "
-    )
-  )
-}
 
 if (!cluster_column %in% colnames(spatial_object@meta.data)) {
+
   stop(
-    "Required spatial cluster metadata column was not found: ",
+    "Required cluster metadata not found: ",
     cluster_column
   )
 }
 
-cat(
-  "Object loaded successfully:\n",
-  "  Features: ", nrow(spatial_object), "\n",
-  "  Spots:    ", ncol(spatial_object), "\n",
-  "  Samples:  ",
-  length(
-    unique(
-      spatial_object$sample
-    )
-  ),
-  "\n",
-  "  Clusters: ",
-  length(
-    unique(
-      spatial_object@meta.data[[cluster_column]]
-    )
-  ),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 6. Set SCT assay and spatial cluster identities
-#------------------------------------------------------------------------------
 
 Seurat::DefaultAssay(
   spatial_object
 ) <- dea_assay
 
+
 Seurat::Idents(
   spatial_object
 ) <- cluster_column
+
 
 cluster_ids <- levels(
   Seurat::Idents(
@@ -259,23 +185,23 @@ cluster_ids <- levels(
   )
 )
 
+
 if (length(cluster_ids) < 2) {
+
   stop(
     "At least two spatial clusters are required for differential expression."
   )
 }
 
-cat(
-  "\nSpatial cluster identities:\n"
+
+message(
+  "Loaded ",
+  ncol(spatial_object),
+  " spots across ",
+  length(cluster_ids),
+  " spatial clusters."
 )
 
-print(
-  cluster_ids
-)
-
-cat(
-  "\nSpots per spatial cluster:\n"
-)
 
 print(
   table(
@@ -286,33 +212,17 @@ print(
 )
 
 
-#------------------------------------------------------------------------------
-# 7. Inspect SCT assay before differential expression
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Inspecting SCT assay before differential expression\n",
-  "------------------------------------------------------------\n"
-)
+# Join multiple SCT data layers if present.
 
 sct_layers <- SeuratObject::Layers(
   spatial_object[[dea_assay]]
 )
 
-cat(
-  "SCT assay layers:\n"
-)
-
-print(
-  sct_layers
-)
 
 if (sum(grepl("^data", sct_layers)) > 1) {
-  cat(
-    "\nMultiple SCT data layers detected.\n",
-    "Joining SCT layers before differential expression...\n",
-    sep = ""
+
+  message(
+    "Joining SCT data layers..."
   )
 
   spatial_object <- SeuratObject::JoinLayers(
@@ -322,36 +232,23 @@ if (sum(grepl("^data", sct_layers)) > 1) {
 }
 
 
-#------------------------------------------------------------------------------
-# 8. Prepare SCT assay for marker analysis when required
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Preparing SCT assay for differential expression\n",
-  "------------------------------------------------------------\n"
-)
+# Prepare merged SCT models for differential expression when required.
 
 sct_model_count <- 0
 
+
 if ("SCTModel.list" %in% slotNames(spatial_object[[dea_assay]])) {
+
   sct_model_count <- length(
     spatial_object[[dea_assay]]@SCTModel.list
   )
 }
 
-cat(
-  "SCT models detected: ",
-  sct_model_count,
-  "\n",
-  sep = ""
-)
 
 if (sct_model_count > 1) {
-  cat(
-    "Multiple SCT models detected.\n",
-    "Running PrepSCTFindMarkers() before DEA...\n",
-    sep = ""
+
+  message(
+    "Preparing multiple SCT models for differential expression..."
   )
 
   spatial_object <- Seurat::PrepSCTFindMarkers(
@@ -359,18 +256,13 @@ if (sct_model_count > 1) {
     assay = dea_assay,
     verbose = FALSE
   )
-} else {
-  cat(
-    "Single SCT model detected; PrepSCTFindMarkers() is not required.\n"
-  )
 }
 
 
-#------------------------------------------------------------------------------
-# 9. Record differential expression parameters
-#------------------------------------------------------------------------------
+# Record analysis parameters.
 
 dea_parameters <- data.frame(
+
   parameter = c(
     "assay",
     "cluster_identity",
@@ -381,6 +273,7 @@ dea_parameters <- data.frame(
     "adjusted_P_threshold",
     "top_markers_per_cluster"
   ),
+
   value = c(
     dea_assay,
     cluster_column,
@@ -391,45 +284,29 @@ dea_parameters <- data.frame(
     adjusted_p_threshold,
     top_markers_per_cluster
   ),
+
   stringsAsFactors = FALSE
 )
 
-dea_parameter_file <- file.path(
-  results_directory,
-  "spatial_cluster_DEA_parameters.csv"
-)
 
 utils::write.csv(
   dea_parameters,
-  dea_parameter_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_DEA_parameters.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 10. Run differential expression for all spatial clusters
+# 3. Differential expression across spatial clusters
 #------------------------------------------------------------------------------
 
-cat(
-  "\n============================================================\n",
-  "Running spatial cluster differential expression\n",
-  "============================================================\n",
-  "Assay:                       ", dea_assay, "\n",
-  "Identity:                    ", cluster_column, "\n",
-  "Test:                        ", marker_test, "\n",
-  "Minimum detection fraction: ", marker_min_pct, "\n",
-  "Testing log2FC threshold:    ",
-  marker_test_log2fc_threshold,
-  "\n",
-  "Reporting log2FC threshold:  ",
-  significant_log2fc_threshold,
-  "\n",
-  "Adjusted P threshold:        ",
-  adjusted_p_threshold,
-  "\n",
-  "============================================================\n\n",
-  sep = ""
+message(
+  "Running differential expression across spatial clusters..."
 )
+
 
 cluster_markers <- Seurat::FindAllMarkers(
   object = spatial_object,
@@ -441,69 +318,43 @@ cluster_markers <- Seurat::FindAllMarkers(
   verbose = FALSE
 )
 
+
 if (nrow(cluster_markers) == 0) {
+
   stop(
     "No spatial cluster marker genes were identified."
   )
 }
 
-cat(
-  "Differential expression completed successfully.\n",
-  "Total marker results: ",
-  nrow(cluster_markers),
-  "\n",
-  sep = ""
-)
 
-
-#------------------------------------------------------------------------------
-# 11. Standardize gene column
-#------------------------------------------------------------------------------
+# Ensure gene symbols are stored explicitly.
 
 if (!"gene" %in% colnames(cluster_markers)) {
+
   cluster_markers$gene <- rownames(
     cluster_markers
   )
 }
 
+
 cluster_markers$gene <- as.character(
   cluster_markers$gene
 )
 
-cluster_markers <- cluster_markers[
-  !is.na(cluster_markers$gene) &
-  cluster_markers$gene != "",
-]
 
-if (anyDuplicated(colnames(cluster_markers)) > 0) {
-  stop(
-    "Duplicated column names were detected in the marker table."
-  )
-}
-
-cat(
-  "Valid marker rows after gene-name cleanup: ",
-  nrow(cluster_markers),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 12. Classify significant differential-expression results
-#------------------------------------------------------------------------------
+# Classify results using the reporting thresholds.
 
 cluster_markers <- cluster_markers %>%
   dplyr::mutate(
+
     significance = dplyr::case_when(
-      !is.na(p_val_adj) &
+
       p_val_adj < adjusted_p_threshold &
-      avg_log2FC > significant_log2fc_threshold ~
+        avg_log2FC > significant_log2fc_threshold ~
         "Upregulated",
 
-      !is.na(p_val_adj) &
       p_val_adj < adjusted_p_threshold &
-      avg_log2FC < -significant_log2fc_threshold ~
+        avg_log2FC < -significant_log2fc_threshold ~
         "Downregulated",
 
       TRUE ~
@@ -511,142 +362,125 @@ cluster_markers <- cluster_markers %>%
     )
   )
 
+
 significant_cluster_markers <- cluster_markers %>%
   dplyr::filter(
     significance != "Not significant"
   )
+
 
 significant_positive_markers <- cluster_markers %>%
   dplyr::filter(
     significance == "Upregulated"
   )
 
+
 significant_negative_markers <- cluster_markers %>%
   dplyr::filter(
     significance == "Downregulated"
   )
 
-cat(
-  "\nSignificant differential-expression results:\n",
-  "  Total significant: ",
+
+message(
+  "DEA complete: ",
   nrow(significant_cluster_markers),
-  "\n",
-  "  Upregulated:       ",
+  " significant results (",
   nrow(significant_positive_markers),
-  "\n",
-  "  Downregulated:     ",
+  " up; ",
   nrow(significant_negative_markers),
-  "\n",
-  sep = ""
+  " down)."
 )
 
 
 #------------------------------------------------------------------------------
-# 13. Save complete and significant marker tables
+# 4. Export and summarize DEG results
 #------------------------------------------------------------------------------
-
-all_marker_file <- file.path(
-  results_directory,
-  "spatial_cluster_markers_all.csv"
-)
-
-significant_marker_file <- file.path(
-  results_directory,
-  "spatial_cluster_markers_significant.csv"
-)
-
-positive_marker_file <- file.path(
-  results_directory,
-  "spatial_cluster_markers_upregulated.csv"
-)
-
-negative_marker_file <- file.path(
-  results_directory,
-  "spatial_cluster_markers_downregulated.csv"
-)
 
 utils::write.csv(
   cluster_markers,
-  all_marker_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_markers_all.csv"
+  ),
   row.names = FALSE
 )
+
 
 utils::write.csv(
   significant_cluster_markers,
-  significant_marker_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_markers_significant.csv"
+  ),
   row.names = FALSE
 )
+
 
 utils::write.csv(
   significant_positive_markers,
-  positive_marker_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_markers_upregulated.csv"
+  ),
   row.names = FALSE
 )
+
 
 utils::write.csv(
   significant_negative_markers,
-  negative_marker_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_markers_downregulated.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 14. Summarize marker results by cluster
-#------------------------------------------------------------------------------
+# Summarize significant genes per cluster.
 
 marker_summary <- cluster_markers %>%
   dplyr::group_by(
     cluster
   ) %>%
   dplyr::summarise(
+
     tested_markers = dplyr::n(),
+
     significant_markers = sum(
       significance != "Not significant"
     ),
+
     upregulated_markers = sum(
       significance == "Upregulated"
     ),
+
     downregulated_markers = sum(
       significance == "Downregulated"
     ),
+
     .groups = "drop"
   )
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Spatial marker summary by cluster\n",
-  "------------------------------------------------------------\n"
-)
 
 print(
   marker_summary
 )
 
-marker_summary_file <- file.path(
-  results_directory,
-  "spatial_cluster_marker_summary.csv"
-)
 
 utils::write.csv(
   marker_summary,
-  marker_summary_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_marker_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 15. Save cluster-specific significant DEG tables
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Saving cluster-specific DEG tables\n",
-  "------------------------------------------------------------\n"
-)
-
-cluster_table_files <- character(0)
+# Save significant DEG tables for individual clusters.
 
 for (cluster_id in cluster_ids) {
+
   cluster_results <- significant_cluster_markers %>%
     dplyr::filter(
       as.character(cluster) == cluster_id
@@ -658,37 +492,24 @@ for (cluster_id in cluster_ids) {
       )
     )
 
-  cluster_table_file <- file.path(
-    cluster_table_directory,
-    paste0(
-      "spatial_cluster_",
-      cluster_id,
-      "_significant_DEGs.csv"
-    )
-  )
 
   utils::write.csv(
     cluster_results,
-    cluster_table_file,
+    file.path(
+      cluster_table_directory,
+      paste0(
+        "spatial_cluster_",
+        cluster_id,
+        "_significant_DEGs.csv"
+      )
+    ),
     row.names = FALSE
-  )
-
-  cluster_table_files <- c(
-    cluster_table_files,
-    cluster_table_file
   )
 }
 
-cat(
-  "Cluster-specific DEG tables written: ",
-  length(cluster_table_files),
-  "\n",
-  sep = ""
-)
-
 
 #------------------------------------------------------------------------------
-# 16. Select top positive markers per cluster
+# 5. Identify and visualize top cluster markers
 #------------------------------------------------------------------------------
 
 top_positive_markers <- significant_positive_markers %>%
@@ -702,65 +523,45 @@ top_positive_markers <- significant_positive_markers %>%
   ) %>%
   dplyr::ungroup()
 
+
 if (nrow(top_positive_markers) == 0) {
+
   stop(
     "No significant positive markers were available for heatmap generation."
   )
 }
 
-top_marker_file <- file.path(
-  results_directory,
-  "spatial_cluster_top10_positive_markers.csv"
-)
 
 utils::write.csv(
   top_positive_markers,
-  top_marker_file,
+  file.path(
+    results_directory,
+    "spatial_cluster_top10_positive_markers.csv"
+  ),
   row.names = FALSE
 )
 
-cat(
-  "\nTop positive markers selected for ",
-  length(
-    unique(
-      top_positive_markers$cluster
-    )
-  ),
-  " clusters.\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 17. Prepare genes for marker heatmap
-#------------------------------------------------------------------------------
 
 heatmap_genes <- unique(
   top_positive_markers$gene
 )
+
 
 heatmap_genes <- intersect(
   heatmap_genes,
   rownames(spatial_object)
 )
 
+
 if (length(heatmap_genes) == 0) {
+
   stop(
-    "None of the selected heatmap genes were found in the spatial object."
+    "Selected marker genes were not found in the spatial object."
   )
 }
 
-cat(
-  "Genes included in marker heatmap: ",
-  length(heatmap_genes),
-  "\n",
-  sep = ""
-)
 
-
-#------------------------------------------------------------------------------
-# 18. Scale selected marker genes for heatmap visualization
-#------------------------------------------------------------------------------
+# Scale only the selected marker genes for visualization.
 
 spatial_object <- Seurat::ScaleData(
   object = spatial_object,
@@ -770,10 +571,6 @@ spatial_object <- Seurat::ScaleData(
 )
 
 
-#------------------------------------------------------------------------------
-# 19. Generate spatial cluster marker heatmap
-#------------------------------------------------------------------------------
-
 cluster_heatmap <- Seurat::DoHeatmap(
   object = spatial_object,
   features = heatmap_genes,
@@ -782,17 +579,17 @@ cluster_heatmap <- Seurat::DoHeatmap(
 ) +
   Seurat::NoLegend()
 
+
 print(
   cluster_heatmap
 )
 
-cluster_heatmap_file <- file.path(
-  figure_directory,
-  "spatial_cluster_top10_marker_heatmap.png"
-)
 
 ggplot2::ggsave(
-  filename = cluster_heatmap_file,
+  filename = file.path(
+    figure_directory,
+    "spatial_cluster_top10_marker_heatmap.png"
+  ),
   plot = cluster_heatmap,
   width = 14,
   height = 12,
@@ -801,37 +598,34 @@ ggplot2::ggsave(
 
 
 #------------------------------------------------------------------------------
-# 20. Generate volcano plots for every spatial cluster
+# 6. Generate cluster volcano plots
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating spatial cluster volcano plots\n",
-  "------------------------------------------------------------\n"
+message(
+  "Generating cluster volcano plots..."
 )
 
-volcano_files <- character(0)
-
-volcano_plot_list <- list()
 
 for (cluster_id in cluster_ids) {
+
   cluster_de <- cluster_markers %>%
     dplyr::filter(
       as.character(cluster) == cluster_id
     ) %>%
     dplyr::mutate(
-      plot_p = dplyr::if_else(
-        is.na(p_val_adj),
-        NA_real_,
-        pmax(
-          p_val_adj,
-          .Machine$double.xmin
-        )
+
+      plot_p = pmax(
+        p_val_adj,
+        .Machine$double.xmin
       ),
+
       neg_log10_p = -log10(
         plot_p
       )
     )
+
+
+  # Label the strongest positive markers for readability.
 
   volcano_labels <- cluster_de %>%
     dplyr::filter(
@@ -843,6 +637,7 @@ for (cluster_id in cluster_ids) {
       with_ties = FALSE
     )
 
+
   volcano_plot <- ggplot2::ggplot(
     cluster_de,
     ggplot2::aes(
@@ -850,6 +645,7 @@ for (cluster_id in cluster_ids) {
       y = neg_log10_p
     )
   ) +
+
     ggplot2::geom_point(
       ggplot2::aes(
         color = significance
@@ -857,6 +653,7 @@ for (cluster_id in cluster_ids) {
       alpha = 0.65,
       size = 1.6
     ) +
+
     ggplot2::geom_vline(
       xintercept = c(
         -significant_log2fc_threshold,
@@ -865,6 +662,7 @@ for (cluster_id in cluster_ids) {
       linetype = "dashed",
       linewidth = 0.5
     ) +
+
     ggplot2::geom_hline(
       yintercept = -log10(
         adjusted_p_threshold
@@ -872,6 +670,7 @@ for (cluster_id in cluster_ids) {
       linetype = "dashed",
       linewidth = 0.5
     ) +
+
     ggrepel::geom_text_repel(
       data = volcano_labels,
       ggplot2::aes(
@@ -884,6 +683,7 @@ for (cluster_id in cluster_ids) {
       max.overlaps = Inf,
       show.legend = FALSE
     ) +
+
     ggplot2::scale_color_manual(
       values = c(
         "Upregulated" = "#D73027",
@@ -891,6 +691,7 @@ for (cluster_id in cluster_ids) {
         "Not significant" = "grey70"
       )
     ) +
+
     ggplot2::labs(
       title = paste0(
         "Spatial Cluster ",
@@ -899,128 +700,52 @@ for (cluster_id in cluster_ids) {
       subtitle = "Cluster compared with all remaining spatial spots",
       x = "Average log2 fold change",
       y = expression(
-        -log[10](
-          "adjusted p-value"
-        )
+        -log[10]("adjusted p-value")
       ),
       color = NULL
     ) +
+
     ggplot2::theme_classic(
       base_size = 12
     ) +
+
     ggplot2::theme(
-      plot.title = ggplot2::element_text(
-        face = "bold",
-        size = 14
-      ),
-      plot.subtitle = ggplot2::element_text(
-        size = 10,
-        color = "grey35"
-      ),
-      axis.title = ggplot2::element_text(
-        face = "bold"
-      ),
-      legend.position = "top",
-      legend.justification = "left"
+      legend.position = "top"
     )
+
+
+  # Display each volcano interactively.
 
   print(
     volcano_plot
   )
 
-  volcano_file <- file.path(
-    volcano_directory,
-    paste0(
-      "spatial_cluster_",
-      cluster_id,
-      "_volcano.png"
-    )
-  )
 
   ggplot2::ggsave(
-    filename = volcano_file,
+    filename = file.path(
+      volcano_directory,
+      paste0(
+        "spatial_cluster_",
+        cluster_id,
+        "_volcano.png"
+      )
+    ),
     plot = volcano_plot,
     width = 7,
     height = 6,
     dpi = 600
   )
-
-  volcano_files <- c(
-    volcano_files,
-    volcano_file
-  )
-
-  volcano_plot_list[[cluster_id]] <- volcano_plot
-}
-
-cat(
-  "Volcano plots generated: ",
-  length(volcano_files),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 21. Generate combined spatial cluster volcano panel
-#------------------------------------------------------------------------------
-
-combined_volcano_file <- NULL
-
-if (length(volcano_plot_list) > 0) {
-
-  combined_volcano_plot <- patchwork::wrap_plots(
-    volcano_plot_list,
-    ncol = 3
-  )
-
-  number_volcano_rows <- ceiling(
-    length(volcano_plot_list) / 3
-  )
-
-  combined_volcano_file <- file.path(
-    figure_directory,
-    "spatial_cluster_volcano_panel.png"
-  )
-
-  ggplot2::ggsave(
-    filename = combined_volcano_file,
-    plot = combined_volcano_plot,
-    width = 20,
-    height = max(
-      6,
-      number_volcano_rows * 6
-    ),
-    dpi = 600,
-    limitsize = FALSE
-  )
-
-  if (!file.exists(combined_volcano_file)) {
-    stop(
-      "Combined spatial volcano panel was not saved successfully:\n",
-      combined_volcano_file
-    )
-  }
-
-  cat(
-    "Combined spatial volcano panel saved successfully:\n",
-    combined_volcano_file,
-    "\n"
-  )
 }
 
 
 #------------------------------------------------------------------------------
-# 22. Examine Prkcd differential expression across spatial clusters
+# 7. Examine Prkcd expression
 #------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Examining Prkcd across spatial clusters\n",
-  "------------------------------------------------------------\n"
-)
 
 if (gene_of_interest %in% rownames(spatial_object)) {
+
+  # Differential-expression results for Prkcd.
+
   prkcd_marker_results <- cluster_markers %>%
     dplyr::filter(
       gene == gene_of_interest
@@ -1029,42 +754,26 @@ if (gene_of_interest %in% rownames(spatial_object)) {
       p_val_adj
     )
 
-  cat(
-    "Prkcd differential-expression results:\n"
-  )
 
   print(
     prkcd_marker_results
   )
 
-  prkcd_marker_file <- file.path(
-    results_directory,
-    "spatial_Prkcd_cluster_DEA.csv"
-  )
 
   utils::write.csv(
     prkcd_marker_results,
-    prkcd_marker_file,
+    file.path(
+      results_directory,
+      "spatial_Prkcd_cluster_DEA.csv"
+    ),
     row.names = FALSE
   )
-} else {
-  warning(
-    "Prkcd was not found in the spatial Seurat object."
-  )
-
-  prkcd_marker_file <- NULL
-}
 
 
-#------------------------------------------------------------------------------
-# 23. Generate Prkcd UMAP visualization
-#------------------------------------------------------------------------------
+  # UMAP expression.
 
-prkcd_umap_file <- NULL
-
-if (gene_of_interest %in% rownames(spatial_object)) {
   prkcd_umap <- Seurat::FeaturePlot(
-    object = spatial_object,
+    spatial_object,
     features = gene_of_interest,
     reduction = "umap"
   ) +
@@ -1072,34 +781,28 @@ if (gene_of_interest %in% rownames(spatial_object)) {
       title = "Prkcd Expression Across Spatial UMAP"
     )
 
+
   print(
     prkcd_umap
   )
 
-  prkcd_umap_file <- file.path(
-    figure_directory,
-    "spatial_Prkcd_UMAP.png"
-  )
 
   ggplot2::ggsave(
-    filename = prkcd_umap_file,
+    filename = file.path(
+      figure_directory,
+      "spatial_Prkcd_UMAP.png"
+    ),
     plot = prkcd_umap,
     width = 7,
     height = 6,
     dpi = 600
   )
-}
 
 
-#------------------------------------------------------------------------------
-# 24. Generate Prkcd violin plot across spatial clusters
-#------------------------------------------------------------------------------
+  # Expression across spatial clusters.
 
-prkcd_violin_file <- NULL
-
-if (gene_of_interest %in% rownames(spatial_object)) {
   prkcd_violin <- Seurat::VlnPlot(
-    object = spatial_object,
+    spatial_object,
     features = gene_of_interest,
     group.by = cluster_column,
     pt.size = 0
@@ -1113,287 +816,114 @@ if (gene_of_interest %in% rownames(spatial_object)) {
       base_size = 12
     )
 
+
   print(
     prkcd_violin
   )
 
-  prkcd_violin_file <- file.path(
-    figure_directory,
-    "spatial_Prkcd_violin_by_cluster.png"
-  )
 
   ggplot2::ggsave(
-    filename = prkcd_violin_file,
+    filename = file.path(
+      figure_directory,
+      "spatial_Prkcd_violin_by_cluster.png"
+    ),
     plot = prkcd_violin,
     width = 9,
     height = 6,
     dpi = 600
   )
-}
 
 
-#------------------------------------------------------------------------------
-# 25. Generate spatial Prkcd maps for each tissue section
-#------------------------------------------------------------------------------
+  # Spatial expression across the four tissue sections.
 
-prkcd_spatial_file <- NULL
-
-if (gene_of_interest %in% rownames(spatial_object)) {
-  prkcd_spatial_normal <- Seurat::SpatialFeaturePlot(
-    spatial_object,
-    features = gene_of_interest,
-    images = "Naive_A9"
-  ) +
-    ggplot2::labs(
-      title = "Normal tissue"
-    )
-
-  prkcd_spatial_niacin <- Seurat::SpatialFeaturePlot(
-    spatial_object,
-    features = gene_of_interest,
-    images = "Niacin2_B5"
-  ) +
-    ggplot2::labs(
-      title = "Niacin treatment"
-    )
-
-  prkcd_spatial_vehicle1 <- Seurat::SpatialFeaturePlot(
-    spatial_object,
-    features = gene_of_interest,
-    images = "Vehicle1_C5"
-  ) +
-    ggplot2::labs(
-      title = "Vehicle 1"
-    )
-
-  prkcd_spatial_vehicle2 <- Seurat::SpatialFeaturePlot(
-    spatial_object,
-    features = gene_of_interest,
-    images = "Vehicle2_D5"
-  ) +
-    ggplot2::labs(
-      title = "Vehicle 2"
-    )
-
-  prkcd_spatial_overview <- (
-    prkcd_spatial_normal |
-    prkcd_spatial_niacin |
-    prkcd_spatial_vehicle1 |
-    prkcd_spatial_vehicle2
+  spatial_images <- c(
+    "Naive_A9",
+    "Niacin2_B5",
+    "Vehicle1_C5",
+    "Vehicle2_D5"
   )
+
+
+  spatial_titles <- c(
+    "Normal tissue",
+    "Niacin treatment",
+    "Vehicle 1",
+    "Vehicle 2"
+  )
+
+
+  prkcd_spatial_plots <- lapply(
+    seq_along(spatial_images),
+    function(i) {
+
+      Seurat::SpatialFeaturePlot(
+        spatial_object,
+        features = gene_of_interest,
+        images = spatial_images[i]
+      ) +
+        ggplot2::labs(
+          title = spatial_titles[i]
+        )
+    }
+  )
+
+
+  # Display the individual tissue sections.
+
+  for (plot_object in prkcd_spatial_plots) {
+
+    print(
+      plot_object
+    )
+  }
+
+
+  # Combine the four tissue sections for comparison.
+
+  prkcd_spatial_overview <- patchwork::wrap_plots(
+    prkcd_spatial_plots,
+    nrow = 1
+  )
+
 
   print(
     prkcd_spatial_overview
   )
 
-  prkcd_spatial_file <- file.path(
-    figure_directory,
-    "spatial_Prkcd_all_slides.png"
-  )
 
   ggplot2::ggsave(
-    filename = prkcd_spatial_file,
+    filename = file.path(
+      figure_directory,
+      "spatial_Prkcd_all_slides.png"
+    ),
     plot = prkcd_spatial_overview,
     width = 20,
     height = 5,
     dpi = 600
   )
-}
 
 
-#------------------------------------------------------------------------------
-# 26. Validate differential-expression results
-#------------------------------------------------------------------------------
+} else {
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Validating spatial differential-expression results\n",
-  "------------------------------------------------------------\n"
-)
-
-required_marker_columns <- c(
-  "gene",
-  "cluster",
-  "avg_log2FC",
-  "p_val",
-  "p_val_adj",
-  "significance"
-)
-
-missing_marker_columns <- setdiff(
-  required_marker_columns,
-  colnames(cluster_markers)
-)
-
-if (length(missing_marker_columns) > 0) {
-  stop(
-    "Required marker-result column(s) missing:\n",
-    paste(
-      missing_marker_columns,
-      collapse = ", "
-    )
-  )
-}
-
-marker_clusters <- sort(
-  unique(
-    as.character(
-      cluster_markers$cluster
-    )
-  )
-)
-
-missing_marker_clusters <- setdiff(
-  cluster_ids,
-  marker_clusters
-)
-
-if (length(missing_marker_clusters) > 0) {
   warning(
-    "No marker results were returned for spatial cluster(s): ",
-    paste(
-      missing_marker_clusters,
-      collapse = ", "
-    )
+    gene_of_interest,
+    " was not found in the spatial object."
   )
 }
-
-if (anyDuplicated(colnames(cluster_markers)) > 0) {
-  stop(
-    "Duplicated column names detected in final marker table."
-  )
-}
-
-cat(
-  "Spatial differential-expression result validation completed successfully.\n"
-)
 
 
 #------------------------------------------------------------------------------
-# 27. Validate expected Module 08 outputs
+# 8. Complete module
 #------------------------------------------------------------------------------
 
-expected_result_files <- c(
-  dea_parameter_file,
-  all_marker_file,
-  significant_marker_file,
-  positive_marker_file,
-  negative_marker_file,
-  marker_summary_file,
-  top_marker_file,
-  cluster_table_files
-)
-
-if (!is.null(prkcd_marker_file)) {
-  expected_result_files <- c(
-    expected_result_files,
-    prkcd_marker_file
-  )
-}
-
-expected_figure_files <- c(
-  cluster_heatmap_file,
-  volcano_files
-)
-
-if (exists("combined_volcano_file")) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    combined_volcano_file
-  )
-}
-
-if (!is.null(prkcd_umap_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    prkcd_umap_file
-  )
-}
-
-if (!is.null(prkcd_violin_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    prkcd_violin_file
-  )
-}
-
-if (!is.null(prkcd_spatial_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    prkcd_spatial_file
-  )
-}
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 08 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 08 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 08 output files were created successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 28. Final module summary
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "MODULE 08 COMPLETE — Spatial cluster differential expression\n",
-  "============================================================\n",
-  "Spatial clusters:        ", length(cluster_ids), "\n",
-  "Total marker results:    ", nrow(cluster_markers), "\n",
-  "Significant DEGs:        ", nrow(significant_cluster_markers), "\n",
-  "Upregulated DEGs:        ", nrow(significant_positive_markers), "\n",
-  "Downregulated DEGs:      ", nrow(significant_negative_markers), "\n",
-  "Testing log2FC cutoff:   ", marker_test_log2fc_threshold, "\n",
-  "Reporting log2FC cutoff: ", significant_log2fc_threshold, "\n",
-  "Adjusted P cutoff:       ", adjusted_p_threshold, "\n",
-  "Volcano plots:           ", length(volcano_files), "\n",
-  "\n",
-  "Complete DEG table:\n",
-  "  ", all_marker_file, "\n",
-  "\n",
-  "Significant DEG table:\n",
-  "  ", significant_marker_file, "\n",
-  "\n",
-  "Cluster-specific tables:\n",
-  "  ", cluster_table_directory, "\n",
-  "\n",
-  "DEA results:\n",
-  "  ", results_directory, "\n",
-  "\n",
-  "DEA figures:\n",
-  "  ", figure_directory, "\n",
-  "\n",
-  "Next module:\n",
-  "  09_spatial_infercnv.Rmd\n",
-  "============================================================\n\n",
-  sep = ""
+message(
+  "Module 08 complete: ",
+  length(cluster_ids),
+  " clusters; ",
+  nrow(cluster_markers),
+  " marker results; ",
+  nrow(significant_cluster_markers),
+  " significant DEGs."
 )
 ```
 

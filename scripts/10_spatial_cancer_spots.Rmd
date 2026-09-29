@@ -8,52 +8,10 @@ date: "2026-08-12"
 #==============================================================================
 # MODULE 10 — Spatial inferCNV cancer-spot classification
 #==============================================================================
-
+#
 # Purpose:
-#   Interpret completed inferCNV results generated in Module 10. Calculate
-#   genome-wide inferCNV burden for individual spatial spots, derive
-#   sample-specific CNV-high thresholds from reference spots, classify
-#   candidate tumor-region spots as malignant-enriched or CNV-low,
-#   characterize chromosome-level HMM gains and losses, compare continuous
-#   CNV dosage between candidate tumor and reference spots, examine recurrent
-#   chr7 gain patterns, transfer inferCNV-derived metadata back to the
-#   integrated four-slide spatial Seurat object, and save a stable
-#   inferCNV-annotated spatial checkpoint for downstream analyses.
-#
-# Inputs:
-#   data/processed/spatial/
-#     spatial_integrated_clustered_seurat.rds
-#
-#   data/processed/spatial/infercnv/
-#     infercnv_prepared_spatial_objects.rds
-#     spatial_infercnv_result_index.rds
-#
-#   results/spatial/infercnv/
-#     Niacin_Treatment/
-#     Vehicle_1/
-#     Vehicle_2/
-#
-# Primary output:
-#   data/processed/spatial/
-#     spatial_infercnv_annotated.rds
-#
-# Sample-level annotated objects:
-#   data/processed/spatial/infercnv/classified/
-#
-# Output tables:
-#   results/spatial/infercnv/cancer_spot_classification/
-#   results/spatial/infercnv/cnv_characterization/
-#
-# Output figures:
-#   figures/spatial/infercnv/cancer_spot_classification/
-#   figures/spatial/infercnv/cnv_characterization/
-#
-# inferCNV-derived metadata:
-#   infercnv_input_group
-#   infercnv_score
-#   infercnv_threshold
-#   infercnv_status
-#   malignancy_annotation
+#   Use completed inferCNV results to identify spatial spots with expression
+#   patterns consistent with large-scale CNV alterations.
 #
 # Classification:
 #   CNV burden:
@@ -63,20 +21,21 @@ date: "2026-08-12"
 #     95th percentile of reference-spot CNV burden within each sample
 #
 #   Malignant-enriched:
-#     candidate tumor-region observation spot AND CNV-high
+#     observation spot AND CNV-high
+#
+# Visualization:
+#   CNV burden is standardized relative to reference spots within each sample.
+#   The z-score is used for visualization only and does not alter the
+#   malignant-enriched classification.
 #
 # Notes:
-#   - Normal tissue was not analyzed with inferCNV and is labeled
-#     "Not assessed".
-#   - inferCNV provides expression-based evidence consistent with large-scale
-#     CNV patterns. It is not direct DNA-based proof of malignancy.
-#   - Malignant-enriched annotations should be interpreted together with
-#     histology, spatial localization, markers, and other biological evidence.
+#   inferCNV provides expression-based evidence consistent with large-scale
+#   CNV alterations. It is not direct DNA-based evidence of malignancy.
 #==============================================================================
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -84,49 +43,21 @@ suppressPackageStartupMessages({
   library(SeuratObject)
   library(infercnv)
   library(dplyr)
-  library(tidyr)
   library(ggplot2)
   library(patchwork)
   library(here)
 })
 
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
-
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
-
-sample_column <- "sample"
-
-annotation_column <- "infercnv_input_group"
-
-reference_label <- "reference"
-
-observation_label <- "observation"
-
-threshold_quantile <- 0.95
-
-run_hmm_characterization <- TRUE
-
-target_chr <- "chr7"
-
-target_start <- 140.9e6
-
-target_end <- 144.9e6
+# Analysis settings
 
 tumor_samples <- c(
   "Niacin_Treatment",
   "Vehicle_1",
   "Vehicle_2"
 )
-
-normal_sample <- "Normal_Tissue"
 
 sample_titles <- c(
   Niacin_Treatment = "Niacin B5",
@@ -140,10 +71,34 @@ image_names <- c(
   Vehicle_2 = "Vehicle2_D5"
 )
 
+reference_label <- "reference"
+observation_label <- "observation"
 
-#------------------------------------------------------------------------------
-# 4. Define repository paths
-#------------------------------------------------------------------------------
+threshold_quantile <- 0.95
+
+
+# UMAP CNV-burden palette
+
+cnv_low_color <- "#2166AC"
+cnv_mid_color <- "#FEE08B"
+cnv_high_color <- "#B2182B"
+
+cnv_z_limits <- c(-3, 3)
+
+
+# Chromosome dosage palette
+#
+# This is directional:
+# blue = lower inferred dosage
+# white = approximately neutral
+# red = higher inferred dosage
+
+dosage_low_color <- "#2166AC"
+dosage_mid_color <- "#F7F7F7"
+dosage_high_color <- "#B2182B"
+
+
+# Repository paths
 
 processed_directory <- here::here(
   "data",
@@ -151,1382 +106,818 @@ processed_directory <- here::here(
   "spatial"
 )
 
-infercnv_object_directory <- here::here(
-  "data",
-  "processed",
-  "spatial",
+infercnv_directory <- file.path(
+  processed_directory,
   "infercnv"
 )
 
-classified_object_directory <- here::here(
-  "data",
-  "processed",
-  "spatial",
-  "infercnv",
-  "classified"
-)
-
-infercnv_results_directory <- here::here(
-  "results",
-  "spatial",
-  "infercnv"
-)
-
-classification_results_directory <- here::here(
+results_directory <- here::here(
   "results",
   "spatial",
   "infercnv",
   "cancer_spot_classification"
 )
 
-cnv_results_directory <- here::here(
-  "results",
-  "spatial",
-  "infercnv",
-  "cnv_characterization"
-)
-
-classification_figure_directory <- here::here(
+figure_directory <- here::here(
   "figures",
   "spatial",
   "infercnv",
   "cancer_spot_classification"
 )
 
-cnv_figure_directory <- here::here(
-  "figures",
-  "spatial",
-  "infercnv",
-  "cnv_characterization"
+dir.create(
+  results_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
 )
 
-directories_to_create <- c(
-  classified_object_directory,
-  classification_results_directory,
-  cnv_results_directory,
-  classification_figure_directory,
-  cnv_figure_directory
+dir.create(
+  figure_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
 )
 
-for (directory in directories_to_create) {
-  dir.create(
-    directory,
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-}
 
+# Input files
 
-#------------------------------------------------------------------------------
-# 5. Define input and output files
-#------------------------------------------------------------------------------
-
-master_spatial_file <- file.path(
+master_file <- file.path(
   processed_directory,
   "spatial_integrated_clustered_seurat.rds"
 )
 
-prepared_object_file <- file.path(
-  infercnv_object_directory,
+prepared_file <- file.path(
+  infercnv_directory,
   "infercnv_prepared_spatial_objects.rds"
 )
 
 result_index_file <- file.path(
-  infercnv_object_directory,
+  infercnv_directory,
   "spatial_infercnv_result_index.rds"
 )
 
-final_master_object_file <- file.path(
+
+# Output object
+
+output_file <- file.path(
   processed_directory,
   "spatial_infercnv_annotated.rds"
 )
 
-final_metadata_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_final_metadata.csv"
-)
 
-parameter_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_classification_parameters.csv"
-)
+# Essential input checks
 
-cat(
-  "\n============================================================\n",
-  "MODULE 11 — Spatial inferCNV cancer-spot classification\n",
-  "============================================================\n",
-  "Repository root:          ", here::here(), "\n",
-  "Integrated spatial input: ", master_spatial_file, "\n",
-  "Prepared inferCNV input:  ", prepared_object_file, "\n",
-  "inferCNV result index:    ", result_index_file, "\n",
-  "Classification results:  ", classification_results_directory, "\n",
-  "CNV results:             ", cnv_results_directory, "\n",
-  "Primary output:          ", final_master_object_file, "\n",
-  "============================================================\n\n",
-  sep = ""
-)
+if (!file.exists(master_file)) {
+  stop("Master spatial object was not found.")
+}
+
+if (!file.exists(prepared_file)) {
+  stop("Prepared inferCNV spatial objects were not found.")
+}
+
+if (!file.exists(result_index_file)) {
+  stop("inferCNV result index was not found.")
+}
 
 
 #------------------------------------------------------------------------------
-# 6. Validate required Module 10 inputs
+# 2. Load inferCNV results
 #------------------------------------------------------------------------------
 
-required_input_files <- c(
-  master_spatial_file,
-  prepared_object_file,
+spatial_object <- readRDS(
+  master_file
+)
+
+prepared_objects <- readRDS(
+  prepared_file
+)
+
+result_index <- readRDS(
   result_index_file
 )
 
-missing_input_files <- required_input_files[
-  !file.exists(required_input_files)
-]
-
-if (length(missing_input_files) > 0) {
-  stop(
-    "Required Module 10 input file(s) were not found:\n",
-    paste(
-      missing_input_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "Required Module 10 checkpoint files were found.\n"
-)
+sample_objects <- prepared_objects$tumor_samples
 
 
-#------------------------------------------------------------------------------
-# 7. Load integrated master spatial object
-#------------------------------------------------------------------------------
-
-spatial_master <- readRDS(
-  master_spatial_file
-)
-
-if (!inherits(spatial_master, "Seurat")) {
-  stop(
-    "Integrated spatial input is not a valid Seurat object."
-  )
-}
-
-if (!sample_column %in% colnames(spatial_master@meta.data)) {
-  stop(
-    "Sample metadata column was not found in master spatial object."
-  )
-}
-
-cat(
-  "\nIntegrated spatial object:\n",
-  "  Features: ", nrow(spatial_master), "\n",
-  "  Spots:    ", ncol(spatial_master), "\n",
-  "  Samples:  ",
-  length(
-    unique(
-      spatial_master@meta.data[[sample_column]]
-    )
-  ),
-  "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 8. Load inferCNV-prepared spatial objects
-#------------------------------------------------------------------------------
-
-prepared_spatial_objects <- readRDS(
-  prepared_object_file
-)
-
-if (!"Tumor_Samples" %in% names(prepared_spatial_objects)) {
-  stop(
-    "Prepared Module 10 object does not contain 'Tumor_Samples'."
-  )
-}
-
-if (!"Normal_Tissue" %in% names(prepared_spatial_objects)) {
-  stop(
-    "Prepared Module 10 object does not contain 'Normal_Tissue'."
-  )
-}
-
-seurat_objects <- prepared_spatial_objects$Tumor_Samples
-
-normal_seurat <- prepared_spatial_objects$Normal_Tissue
-
-missing_tumor_samples <- setdiff(
+missing_samples <- setdiff(
   tumor_samples,
-  names(seurat_objects)
+  names(sample_objects)
 )
 
-if (length(missing_tumor_samples) > 0) {
+if (length(missing_samples) > 0) {
   stop(
-    "Prepared tumor Seurat objects are missing:\n",
-    paste(
-      missing_tumor_samples,
-      collapse = ", "
-    )
+    "Missing prepared tumor samples: ",
+    paste(missing_samples, collapse = ", ")
   )
 }
 
-cat(
-  "\nPrepared tumor-bearing spatial objects:\n"
-)
-
-print(
-  vapply(
-    seurat_objects,
-    ncol,
-    numeric(1)
-  )
-)
-
-
-#------------------------------------------------------------------------------
-# 9. Load inferCNV result index
-#------------------------------------------------------------------------------
-
-infercnv_result_index <- readRDS(
-  result_index_file
-)
-
-missing_index_samples <- setdiff(
-  tumor_samples,
-  names(infercnv_result_index)
-)
-
-if (length(missing_index_samples) > 0) {
-  stop(
-    "inferCNV result index is missing sample(s):\n",
-    paste(
-      missing_index_samples,
-      collapse = ", "
-    )
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 10. Load completed inferCNV objects
-#------------------------------------------------------------------------------
 
 infercnv_objects <- list()
 
-for (sample_name in tumor_samples) {
-  current_result_file <- infercnv_result_index[[sample_name]]$result_file
 
-  if (!file.exists(current_result_file)) {
+for (sample_name in tumor_samples) {
+
+  result_file <- result_index[[sample_name]]$result_file
+
+  if (!file.exists(result_file)) {
     stop(
-      "inferCNV result file was not found for ",
-      sample_name,
-      ":\n",
-      current_result_file
+      "inferCNV result not found for ",
+      sample_name
     )
   }
 
   infercnv_objects[[sample_name]] <- readRDS(
-    current_result_file
+    result_file
   )
-
-  if (!inherits(infercnv_objects[[sample_name]], "infercnv")) {
-    stop(
-      "Loaded result is not an infercnv object for ",
-      sample_name
-    )
-  }
 }
 
-cat(
-  "\nCompleted inferCNV objects loaded successfully.\n"
+
+message(
+  "Loaded inferCNV results for ",
+  length(infercnv_objects),
+  " tumor-bearing samples."
 )
 
 
 #------------------------------------------------------------------------------
-# 11. Locate inferCNV HMM region files
+# 3. Score and classify spots
 #------------------------------------------------------------------------------
 
-hmm_files <- character(0)
-
-for (sample_name in tumor_samples) {
-  sample_output_directory <-
-    infercnv_result_index[[sample_name]]$output_directory
-
-  candidate_hmm_files <- list.files(
-    sample_output_directory,
-    pattern = "pred_cnv_regions\\.dat$",
-    full.names = TRUE
-  )
-
-  if (length(candidate_hmm_files) == 0) {
-    warning(
-      "No HMM predicted CNV-region file found for ",
-      sample_name
-    )
-
-    next
-  }
-
-  hmm_files[sample_name] <- candidate_hmm_files[1]
-}
-
-cat(
-  "\nHMM CNV-region files detected:\n"
-)
-
-print(
-  hmm_files
-)
-
-
-#------------------------------------------------------------------------------
-# 12. Define genome-wide inferCNV burden function
-#------------------------------------------------------------------------------
-
-score_infercnv_spots <- function(
+score_infercnv <- function(
     infercnv_object,
-    seurat_object,
-    annotation_column,
-    reference_label,
-    threshold_quantile
+    seurat_object
 ) {
-  infercnv_matrix <- infercnv_object@expr.data
 
-  if (nrow(infercnv_matrix) == 0 ||
-      ncol(infercnv_matrix) == 0) {
-    stop(
-      "inferCNV expression matrix is empty."
-    )
-  }
+  cnv_matrix <- infercnv_object@expr.data
 
-  cnv_score <- apply(
-    infercnv_matrix,
-    2,
-    function(x) {
-      mean(
-        abs(x - 1),
-        na.rm = TRUE
-      )
-    }
+
+  # Genome-wide deviation from neutral inferCNV value of 1
+
+  cnv_score <- colMeans(
+    abs(cnv_matrix - 1),
+    na.rm = TRUE
   )
 
-  matched_spots <- intersect(
+
+  common_spots <- intersect(
     names(cnv_score),
     colnames(seurat_object)
   )
 
-  if (length(matched_spots) == 0) {
-    stop(
-      "No inferCNV barcodes matched the associated Seurat object."
-    )
+  if (length(common_spots) == 0) {
+    stop("No inferCNV barcodes matched the spatial object.")
   }
 
-  spot_metadata <- seurat_object@meta.data[
-    matched_spots,
-    ,
-    drop = FALSE
+
+  groups <- seurat_object$infercnv_input_group[
+    match(
+      common_spots,
+      colnames(seurat_object)
+    )
   ]
 
-  if (!annotation_column %in% colnames(spot_metadata)) {
-    stop(
-      "Required inferCNV annotation column was not found: ",
-      annotation_column
-    )
-  }
 
   score_table <- data.frame(
-    spot = matched_spots,
-    cnv_score = as.numeric(
-      cnv_score[matched_spots]
-    ),
-    input_group = as.character(
-      spot_metadata[[annotation_column]]
-    ),
+    spot = common_spots,
+    infercnv_score = cnv_score[common_spots],
+    infercnv_input_group = groups,
     stringsAsFactors = FALSE
   )
 
-  reference_scores <- score_table$cnv_score[
-    score_table$input_group == reference_label
+
+  reference_scores <- score_table$infercnv_score[
+    score_table$infercnv_input_group == reference_label
   ]
 
   if (length(reference_scores) == 0) {
-    stop(
-      "No reference spots were available for threshold calculation."
-    )
+    stop("No reference spots were available.")
   }
 
-  cnv_threshold <- as.numeric(
-    stats::quantile(
+
+  # Reference-derived threshold used for classification
+
+  threshold <- as.numeric(
+    quantile(
       reference_scores,
       probs = threshold_quantile,
       na.rm = TRUE
     )
   )
 
+
   score_table$infercnv_status <- ifelse(
-    score_table$cnv_score > cnv_threshold,
+    score_table$infercnv_score > threshold,
     "CNV-high",
     "CNV-low"
   )
 
-  return(
-    list(
-      score_table = score_table,
-      threshold = cnv_threshold
-    )
-  )
-}
 
+  score_table$malignancy_annotation <- case_when(
 
-#------------------------------------------------------------------------------
-# 13. Calculate inferCNV burden across tumor-bearing slides
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Calculating genome-wide inferCNV burden\n",
-  "------------------------------------------------------------\n"
-)
-
-infercnv_scoring_results <- list()
-
-for (sample_name in tumor_samples) {
-  cat(
-    "\nScoring ",
-    sample_titles[[sample_name]],
-    "...\n",
-    sep = ""
-  )
-
-  infercnv_scoring_results[[sample_name]] <-
-    score_infercnv_spots(
-      infercnv_object = infercnv_objects[[sample_name]],
-      seurat_object = seurat_objects[[sample_name]],
-      annotation_column = annotation_column,
-      reference_label = reference_label,
-      threshold_quantile = threshold_quantile
-    )
-
-  cat(
-    "Reference-derived CNV-high threshold: ",
-    signif(
-      infercnv_scoring_results[[sample_name]]$threshold,
-      5
-    ),
-    "\n",
-    sep = ""
-  )
-
-  print(
-    table(
-      infercnv_scoring_results[[sample_name]]$score_table$infercnv_status
-    )
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 14. Add inferCNV scores and classifications to tumor Seurat objects
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Adding inferCNV scores to tumor Seurat objects\n",
-  "------------------------------------------------------------\n"
-)
-
-for (sample_name in tumor_samples) {
-  score_table <-
-    infercnv_scoring_results[[sample_name]]$score_table
-
-  score_map <- stats::setNames(
-    score_table$cnv_score,
-    score_table$spot
-  )
-
-  status_map <- stats::setNames(
-    score_table$infercnv_status,
-    score_table$spot
-  )
-
-  seurat_objects[[sample_name]]$infercnv_score <-
-    unname(
-      score_map[
-        colnames(seurat_objects[[sample_name]])
-      ]
-    )
-
-  seurat_objects[[sample_name]]$infercnv_status <-
-    unname(
-      status_map[
-        colnames(seurat_objects[[sample_name]])
-      ]
-    )
-
-  seurat_objects[[sample_name]]$infercnv_threshold <-
-    infercnv_scoring_results[[sample_name]]$threshold
-}
-
-cat(
-  "inferCNV burden values added successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 15. Validate barcode scoring
-#------------------------------------------------------------------------------
-
-barcode_summary <- data.frame()
-
-for (sample_name in tumor_samples) {
-  score_table <-
-    infercnv_scoring_results[[sample_name]]$score_table
-
-  matched_barcodes <- intersect(
-    colnames(seurat_objects[[sample_name]]),
-    score_table$spot
-  )
-
-  current_summary <- data.frame(
-    sample = sample_name,
-    seurat_spots = ncol(
-      seurat_objects[[sample_name]]
-    ),
-    infercnv_scored_spots = nrow(
-      score_table
-    ),
-    matched_spots = length(
-      matched_barcodes
-    ),
-    stringsAsFactors = FALSE
-  )
-
-  barcode_summary <- dplyr::bind_rows(
-    barcode_summary,
-    current_summary
-  )
-}
-
-cat(
-  "\nBarcode matching summary:\n"
-)
-
-print(
-  barcode_summary
-)
-
-barcode_summary_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_barcode_matching_summary.csv"
-)
-
-utils::write.csv(
-  barcode_summary,
-  barcode_summary_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 16. Create malignant-enriched spot classification
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Creating malignant-enriched spot annotations\n",
-  "------------------------------------------------------------\n"
-)
-
-for (sample_name in tumor_samples) {
-  current_object <- seurat_objects[[sample_name]]
-
-  current_object$malignancy_annotation <- dplyr::case_when(
-    current_object$infercnv_input_group == observation_label &
-    current_object$infercnv_status == "CNV-high" ~
+    score_table$infercnv_input_group == observation_label &
+      score_table$infercnv_status == "CNV-high" ~
       "Malignant-enriched",
 
-    current_object$infercnv_input_group == observation_label &
-    current_object$infercnv_status == "CNV-low" ~
+    score_table$infercnv_input_group == observation_label &
+      score_table$infercnv_status == "CNV-low" ~
       "Tumor-region CNV-low",
 
-    current_object$infercnv_input_group == reference_label ~
+    score_table$infercnv_input_group == reference_label ~
       "Non-malignant reference",
 
     TRUE ~
       "Not assessed"
   )
 
-  seurat_objects[[sample_name]] <- current_object
-}
 
-cat(
-  "\nFinal malignancy classifications:\n"
-)
+  # Standardize CNV burden relative to reference spots.
+  # This score is used for visualization only.
 
-for (sample_name in tumor_samples) {
-  cat(
-    "\n",
-    sample_titles[[sample_name]],
-    "\n",
-    sep = ""
+  reference_mean <- mean(
+    reference_scores,
+    na.rm = TRUE
   )
 
-  print(
-    table(
-      seurat_objects[[sample_name]]$malignancy_annotation,
-      useNA = "ifany"
-    )
+  reference_sd <- sd(
+    reference_scores,
+    na.rm = TRUE
   )
+
+  if (is.na(reference_sd) || reference_sd == 0) {
+    stop("Reference CNV burden has zero variance.")
+  }
+
+
+  score_table$infercnv_zscore <- (
+    score_table$infercnv_score - reference_mean
+  ) / reference_sd
+
+
+  score_table$infercnv_threshold <- threshold
+
+  return(score_table)
 }
 
 
-#------------------------------------------------------------------------------
-# 17. Save sample-level inferCNV scoring tables
-#------------------------------------------------------------------------------
+spot_results <- list()
 
-spot_score_files <- character(0)
 
 for (sample_name in tumor_samples) {
-  score_table <-
-    infercnv_scoring_results[[sample_name]]$score_table
+
+  score_table <- score_infercnv(
+    infercnv_objects[[sample_name]],
+    sample_objects[[sample_name]]
+  )
 
   score_table$sample <- sample_name
 
-  score_table$threshold <-
-    infercnv_scoring_results[[sample_name]]$threshold
+  spot_results[[sample_name]] <- score_table
 
-  score_table$malignancy_annotation <-
-    seurat_objects[[sample_name]]$malignancy_annotation[
-      match(
-        score_table$spot,
-        colnames(seurat_objects[[sample_name]])
-      )
+
+  current_object <- sample_objects[[sample_name]]
+
+  match_index <- match(
+    colnames(current_object),
+    score_table$spot
+  )
+
+
+  current_object$infercnv_score <- score_table$infercnv_score[
+    match_index
+  ]
+
+  current_object$infercnv_zscore <- score_table$infercnv_zscore[
+    match_index
+  ]
+
+  current_object$infercnv_threshold <- score_table$infercnv_threshold[
+    match_index
+  ]
+
+  current_object$infercnv_status <- score_table$infercnv_status[
+    match_index
+  ]
+
+  current_object$malignancy_annotation <-
+    score_table$malignancy_annotation[
+      match_index
     ]
 
-  score_file <- file.path(
-    classification_results_directory,
-    paste0(
-      sample_name,
-      "_infercnv_spot_scores.csv"
+
+  sample_objects[[sample_name]] <- current_object
+
+
+  message(
+    sample_titles[[sample_name]],
+    ": threshold = ",
+    signif(
+      unique(score_table$infercnv_threshold),
+      4
+    ),
+    "; malignant-enriched spots = ",
+    sum(
+      score_table$malignancy_annotation ==
+        "Malignant-enriched"
     )
-  )
-
-  utils::write.csv(
-    score_table,
-    score_file,
-    row.names = FALSE
-  )
-
-  spot_score_files <- c(
-    spot_score_files,
-    score_file
   )
 }
 
 
-#------------------------------------------------------------------------------
-# 18. Save classification summary
-#------------------------------------------------------------------------------
-
-classification_summary <- dplyr::bind_rows(
-  lapply(
-    tumor_samples,
-    function(sample_name) {
-      seurat_objects[[sample_name]]@meta.data %>%
-        dplyr::count(
-          malignancy_annotation,
-          name = "spots"
-        ) %>%
-        dplyr::mutate(
-          sample = sample_name
-        )
-    }
-  )
+all_spot_results <- bind_rows(
+  spot_results
 )
 
-classification_summary <- classification_summary[, c(
-  "sample",
-  "malignancy_annotation",
-  "spots"
-)]
 
-classification_summary_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_classification_summary.csv"
-)
-
-utils::write.csv(
-  classification_summary,
-  classification_summary_file,
+write.csv(
+  all_spot_results,
+  file.path(
+    results_directory,
+    "spatial_infercnv_spot_classification.csv"
+  ),
   row.names = FALSE
 )
+
+
+classification_summary <- all_spot_results %>%
+  count(
+    sample,
+    malignancy_annotation,
+    name = "spots"
+  )
+
 
 print(
   classification_summary
 )
 
 
+write.csv(
+  classification_summary,
+  file.path(
+    results_directory,
+    "spatial_infercnv_classification_summary.csv"
+  ),
+  row.names = FALSE
+)
+
+
 #------------------------------------------------------------------------------
-# 19. Plot inferCNV burden distributions
+# 4. Visualize inferCNV classification
 #------------------------------------------------------------------------------
 
-cnv_score_plots <- list()
+burden_plots <- list()
+spatial_score_plots <- list()
+malignancy_plots <- list()
 
-cnv_score_plot_files <- character(0)
 
 for (sample_name in tumor_samples) {
-  plot_data <-
-    infercnv_scoring_results[[sample_name]]$score_table
 
-  current_plot <- ggplot2::ggplot(
-    plot_data,
-    ggplot2::aes(
-      x = input_group,
-      y = cnv_score
+  score_table <- spot_results[[sample_name]]
+
+  current_object <- sample_objects[[sample_name]]
+
+  threshold <- unique(
+    score_table$infercnv_threshold
+  )
+
+
+  #--------------------------------------------------------------------------
+  # CNV burden: reference versus observation
+  #--------------------------------------------------------------------------
+
+  burden_plot <- ggplot(
+    score_table,
+    aes(
+      x = infercnv_input_group,
+      y = infercnv_score
     )
   ) +
-    ggplot2::geom_violin(
+    geom_violin(
       trim = FALSE
     ) +
-    ggplot2::geom_boxplot(
+    geom_boxplot(
       width = 0.15,
       outlier.shape = NA
     ) +
-    ggplot2::geom_hline(
-      yintercept =
-        infercnv_scoring_results[[sample_name]]$threshold,
+    geom_hline(
+      yintercept = threshold,
       linetype = "dashed"
     ) +
-    ggplot2::labs(
-      title = paste0(
-        sample_titles[[sample_name]],
-        " — inferCNV burden"
-      ),
-      subtitle =
-        "Dashed line = reference-derived CNV-high threshold",
+    labs(
+      title = sample_titles[[sample_name]],
+      subtitle = "Dashed line = reference 95th percentile",
       x = NULL,
-      y = "Genome-wide inferCNV burden"
+      y = "inferCNV burden"
     ) +
-    ggplot2::theme_bw(
+    theme_bw(
       base_size = 12
-    ) +
-    ggplot2::theme(
-      plot.title = ggplot2::element_text(
-        hjust = 0.5,
-        face = "bold"
-      ),
-      plot.subtitle = ggplot2::element_text(
-        hjust = 0.5
-      )
     )
 
-  cnv_score_plots[[sample_name]] <- current_plot
 
-  current_file <- file.path(
-    classification_figure_directory,
-    paste0(
-      sample_name,
-      "_infercnv_burden_by_input_group.png"
-    )
+  print(
+    burden_plot
   )
 
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 7,
-    height = 6,
+
+  ggsave(
+    file.path(
+      figure_directory,
+      paste0(
+        sample_name,
+        "_infercnv_burden.png"
+      )
+    ),
+    burden_plot,
+    width = 6,
+    height = 5,
     dpi = 600
   )
 
-  cnv_score_plot_files <- c(
-    cnv_score_plot_files,
-    current_file
+
+  burden_plots[[sample_name]] <- burden_plot
+
+
+  #--------------------------------------------------------------------------
+# Spatial inferCNV burden
+#--------------------------------------------------------------------------
+
+spatial_score_plot <- SpatialFeaturePlot(
+  current_object,
+  features = "infercnv_zscore",
+  images = image_names[[sample_name]],
+  pt.size.factor = 1.6
+) +
+  labs(
+    title = paste0(
+      sample_titles[[sample_name]],
+      " — inferCNV burden"
+    )
   )
+
+
+print(
+  spatial_score_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    paste0(
+      sample_name,
+      "_spatial_infercnv_zscore.png"
+    )
+  ),
+  spatial_score_plot,
+  width = 7,
+  height = 7,
+  dpi = 600
+)
+
+
+spatial_score_plots[[sample_name]] <- spatial_score_plot
+
+  #--------------------------------------------------------------------------
+  # Final spatial malignancy classification
+  #--------------------------------------------------------------------------
+
+  malignancy_plot <- SpatialDimPlot(
+    current_object,
+    group.by = "malignancy_annotation",
+    images = image_names[[sample_name]],
+    pt.size.factor = 1.6
+  ) +
+    labs(
+      title = paste0(
+        sample_titles[[sample_name]],
+        " — inferCNV classification"
+      )
+    )
+
+
+  print(
+    malignancy_plot
+  )
+
+
+  ggsave(
+    file.path(
+      figure_directory,
+      paste0(
+        sample_name,
+        "_spatial_malignancy_classification.png"
+      )
+    ),
+    malignancy_plot,
+    width = 7,
+    height = 7,
+    dpi = 600
+  )
+
+
+  malignancy_plots[[sample_name]] <-
+    malignancy_plot
 }
 
-combined_cnv_score_plot <- patchwork::wrap_plots(
-  cnv_score_plots,
-  ncol = 3
+
+# Combined overview plots
+
+burden_overview <- wrap_plots(
+  burden_plots,
+  nrow = 1
 )
 
-combined_cnv_score_file <- file.path(
-  classification_figure_directory,
-  "combined_infercnv_burden_by_input_group.png"
+spatial_score_overview <- wrap_plots(
+  spatial_score_plots,
+  nrow = 1
 )
 
-ggplot2::ggsave(
-  filename = combined_cnv_score_file,
-  plot = combined_cnv_score_plot,
+malignancy_overview <- wrap_plots(
+  malignancy_plots,
+  nrow = 1
+)
+
+
+print(
+  burden_overview
+)
+
+print(
+  spatial_score_overview
+)
+
+print(
+  malignancy_overview
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "infercnv_burden_overview.png"
+  ),
+  burden_overview,
   width = 18,
+  height = 5,
+  dpi = 600
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_infercnv_zscore_overview.png"
+  ),
+  spatial_score_overview,
+  width = 20,
+  height = 7,
+  dpi = 600
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_malignancy_classification_overview.png"
+  ),
+  malignancy_overview,
+  width = 20,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 5. Evaluate final cancer-spot classification
+#------------------------------------------------------------------------------
+
+classification_levels <- c(
+  "Non-malignant reference",
+  "Tumor-region CNV-low",
+  "Malignant-enriched"
+)
+
+
+#------------------------------------------------------------------------------
+# 5A. CNV burden across final classifications
+#------------------------------------------------------------------------------
+
+classification_plot_data <- all_spot_results %>%
+  filter(
+    malignancy_annotation %in%
+      classification_levels
+  ) %>%
+  mutate(
+    malignancy_annotation = factor(
+      malignancy_annotation,
+      levels = classification_levels
+    ),
+    sample_label = factor(
+      sample_titles[sample],
+      levels = sample_titles[tumor_samples]
+    )
+  )
+
+malignancy_colors <- c(
+  "Malignant-enriched"       = "#F8766D",
+  "Non-malignant reference"  = "#00BA38",
+  "Tumor-region CNV-low"     = "#619CFF"
+)
+
+classification_burden_plot <- ggplot(
+  classification_plot_data,
+  aes(
+    x = malignancy_annotation,
+    y = infercnv_score,
+    fill = malignancy_annotation
+  )
+) +
+  
+  geom_violin(
+    trim = FALSE,
+    alpha = 0.8,
+    linewidth = 0.3
+  ) +
+  
+  geom_boxplot(
+    width = 0.14,
+    outlier.shape = NA,
+    fill = "white",
+    linewidth = 0.35
+  ) +
+  
+  facet_wrap(
+    ~ sample_label,
+    scales = "free_y",
+    nrow = 1
+  ) +
+  
+  scale_fill_manual(
+    values = malignancy_colors,
+    name = NULL
+  ) +
+  
+  labs(
+    title = "inferCNV burden across final spot classifications",
+    x = NULL,
+    y = "inferCNV burden"
+  ) +
+  
+  theme_bw(
+    base_size = 12
+  ) +
+  
+  theme(
+    
+    # Remove redundant x-axis labels
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    
+    # Facet labels
+    strip.text = element_text(
+      face = "bold"
+    ),
+    
+    # Compact legend above plot
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.justification = "center",
+    
+    # Reduce excess space around legend
+    legend.margin = margin(
+      t = 0,
+      r = 0,
+      b = 2,
+      l = 0
+    ),
+    
+    # Clean panel appearance
+    panel.grid.minor = element_blank()
+  ) +
+  
+  guides(
+    fill = guide_legend(
+      nrow = 1,
+      byrow = TRUE
+    )
+  )
+
+
+classification_burden_plot
+
+
+print(
+  classification_burden_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "infercnv_burden_by_final_classification.png"
+  ),
+  classification_burden_plot,
+  width = 14,
+  height = 5,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 5B. Classification composition by sample
+#------------------------------------------------------------------------------
+
+composition_data <- classification_summary %>%
+  filter(
+    malignancy_annotation %in%
+      classification_levels
+  ) %>%
+  group_by(
+    sample
+  ) %>%
+  mutate(
+    percent = 100 * spots / sum(spots)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    malignancy_annotation = factor(
+      malignancy_annotation,
+      levels = classification_levels
+    ),
+    sample_label = factor(
+      sample_titles[sample],
+      levels = sample_titles[tumor_samples]
+    )
+  )
+
+
+classification_composition_plot <- ggplot(
+  composition_data,
+  aes(
+    x = sample_label,
+    y = percent,
+    fill = malignancy_annotation
+  )
+) +
+  geom_col(
+    width = 0.7
+  ) +
+  labs(
+    title = "inferCNV classification composition by sample",
+    x = NULL,
+    y = "Spots (%)",
+    fill = "Classification"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = c(0, 0)
+  ) +
+  theme_bw(
+    base_size = 12
+  )
+
+
+print(
+  classification_composition_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "infercnv_classification_composition_by_sample.png"
+  ),
+  classification_composition_plot,
+  width = 8,
   height = 6,
   dpi = 600
 )
 
 
 #------------------------------------------------------------------------------
-# 20. Generate spatial inferCNV burden maps
+# 6. Chromosome-level inferred CNV dosage
 #------------------------------------------------------------------------------
 
-cnv_spatial_plots <- list()
+chromosome_results <- list()
 
-cnv_spatial_plot_files <- character(0)
 
 for (sample_name in tumor_samples) {
-  current_object <- seurat_objects[[sample_name]]
 
-  image_name <- image_names[[sample_name]]
+  infercnv_object <-
+    infercnv_objects[[sample_name]]
 
-  if (!image_name %in% Seurat::Images(current_object)) {
-    warning(
-      "Spatial image was not found for ",
-      sample_name,
-      ": ",
-      image_name
-    )
+  current_object <-
+    sample_objects[[sample_name]]
 
-    next
-  }
-
-  current_plot <- Seurat::SpatialFeaturePlot(
-    current_object,
-    features = "infercnv_score",
-    images = image_name,
-    pt.size.factor = 1.6
-  ) +
-    ggplot2::labs(
-      title = paste0(
-        sample_titles[[sample_name]],
-        " — inferCNV burden"
-      )
-    ) +
-    ggplot2::theme(
-      plot.title = ggplot2::element_text(
-        hjust = 0.5,
-        face = "bold"
-      )
-    )
-
-  cnv_spatial_plots[[sample_name]] <- current_plot
-
-  current_file <- file.path(
-    classification_figure_directory,
-    paste0(
-      sample_name,
-      "_spatial_infercnv_burden.png"
-    )
-  )
-
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 8,
-    height = 8,
-    dpi = 600
-  )
-
-  cnv_spatial_plot_files <- c(
-    cnv_spatial_plot_files,
-    current_file
-  )
-}
-
-combined_cnv_spatial_file <- NULL
-
-if (length(cnv_spatial_plots) > 0) {
-  combined_cnv_spatial_plot <- patchwork::wrap_plots(
-    cnv_spatial_plots,
-    ncol = 3
-  )
-
-  combined_cnv_spatial_file <- file.path(
-    classification_figure_directory,
-    "combined_spatial_infercnv_burden.png"
-  )
-
-  ggplot2::ggsave(
-    filename = combined_cnv_spatial_file,
-    plot = combined_cnv_spatial_plot,
-    width = 21,
-    height = 7,
-    dpi = 600
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 21. Generate spatial CNV-high / CNV-low maps
-#------------------------------------------------------------------------------
-
-cnv_status_plots <- list()
-
-cnv_status_plot_files <- character(0)
-
-for (sample_name in tumor_samples) {
-  current_object <- seurat_objects[[sample_name]]
-
-  image_name <- image_names[[sample_name]]
-
-  if (!image_name %in% Seurat::Images(current_object)) {
-    next
-  }
-
-  current_plot <- Seurat::SpatialDimPlot(
-    current_object,
-    group.by = "infercnv_status",
-    images = image_name,
-    pt.size.factor = 1.6
-  ) +
-    ggplot2::labs(
-      title = paste0(
-        sample_titles[[sample_name]],
-        " — CNV classification"
-      )
-    )
-
-  cnv_status_plots[[sample_name]] <- current_plot
-
-  current_file <- file.path(
-    classification_figure_directory,
-    paste0(
-      sample_name,
-      "_spatial_infercnv_status.png"
-    )
-  )
-
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 8,
-    height = 8,
-    dpi = 600
-  )
-
-  cnv_status_plot_files <- c(
-    cnv_status_plot_files,
-    current_file
-  )
-}
-
-combined_cnv_status_file <- NULL
-
-if (length(cnv_status_plots) > 0) {
-  combined_cnv_status_plot <- patchwork::wrap_plots(
-    cnv_status_plots,
-    ncol = 3
-  )
-
-  combined_cnv_status_file <- file.path(
-    classification_figure_directory,
-    "combined_spatial_infercnv_status.png"
-  )
-
-  ggplot2::ggsave(
-    filename = combined_cnv_status_file,
-    plot = combined_cnv_status_plot,
-    width = 21,
-    height = 7,
-    dpi = 600
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 22. Generate malignant-enriched spatial maps
-#------------------------------------------------------------------------------
-
-malignancy_plots <- list()
-
-malignancy_plot_files <- character(0)
-
-for (sample_name in tumor_samples) {
-  current_object <- seurat_objects[[sample_name]]
-
-  image_name <- image_names[[sample_name]]
-
-  if (!image_name %in% Seurat::Images(current_object)) {
-    next
-  }
-
-  current_plot <- Seurat::SpatialDimPlot(
-    current_object,
-    group.by = "malignancy_annotation",
-    images = image_name,
-    pt.size.factor = 1.6
-  ) +
-    ggplot2::labs(
-      title = paste0(
-        sample_titles[[sample_name]],
-        " — malignant spot classification"
-      )
-    )
-
-  malignancy_plots[[sample_name]] <- current_plot
-
-  current_file <- file.path(
-    classification_figure_directory,
-    paste0(
-      sample_name,
-      "_spatial_malignancy_annotation.png"
-    )
-  )
-
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 8,
-    height = 8,
-    dpi = 600
-  )
-
-  malignancy_plot_files <- c(
-    malignancy_plot_files,
-    current_file
-  )
-}
-
-combined_malignancy_file <- NULL
-
-if (length(malignancy_plots) > 0) {
-  combined_malignancy_plot <- patchwork::wrap_plots(
-    malignancy_plots,
-    ncol = 3
-  )
-
-  combined_malignancy_file <- file.path(
-    classification_figure_directory,
-    "combined_spatial_malignancy_annotation.png"
-  )
-
-  ggplot2::ggsave(
-    filename = combined_malignancy_file,
-    plot = combined_malignancy_plot,
-    width = 21,
-    height = 7,
-    dpi = 600
-  )
-}
-
-
-#==============================================================================
-# HMM CNV CHARACTERIZATION
-#==============================================================================
-
-
-#------------------------------------------------------------------------------
-# 23. Define interval-merging helper
-#------------------------------------------------------------------------------
-
-merge_intervals <- function(interval_data) {
-  interval_data <- interval_data %>%
-    dplyr::arrange(
-      start,
-      end
-    )
-
-  if (nrow(interval_data) == 0) {
-    return(
-      data.frame(
-        start = numeric(0),
-        end = numeric(0)
-      )
-    )
-  }
-
-  merged <- list()
-
-  current_start <- interval_data$start[1]
-
-  current_end <- interval_data$end[1]
-
-  interval_number <- 1
-
-  if (nrow(interval_data) > 1) {
-    for (i in 2:nrow(interval_data)) {
-      if (interval_data$start[i] <= current_end) {
-        current_end <- max(
-          current_end,
-          interval_data$end[i]
-        )
-      } else {
-        merged[[interval_number]] <- data.frame(
-          start = current_start,
-          end = current_end
-        )
-
-        interval_number <- interval_number + 1
-
-        current_start <- interval_data$start[i]
-
-        current_end <- interval_data$end[i]
-      }
-    }
-  }
-
-  merged[[interval_number]] <- data.frame(
-    start = current_start,
-    end = current_end
-  )
-
-  dplyr::bind_rows(
-    merged
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 24. Define HMM chromosome-characterization function
-#------------------------------------------------------------------------------
-
-analyze_hmm_regions <- function(
-    hmm_file,
-    sample_name
-) {
-  hmm_regions <- utils::read.delim(
-    hmm_file,
-    stringsAsFactors = FALSE
-  )
-
-  required_columns <- c(
-    "cell_group_name",
-    "cnv_name",
-    "state",
-    "chr",
-    "start",
-    "end"
-  )
-
-  missing_columns <- setdiff(
-    required_columns,
-    colnames(hmm_regions)
-  )
-
-  if (length(missing_columns) > 0) {
-    stop(
-      "HMM file does not contain expected columns:\n",
-      paste(
-        missing_columns,
-        collapse = ", "
-      )
-    )
-  }
-
-  hmm_regions <- hmm_regions %>%
-    dplyr::mutate(
-      cnv_type = dplyr::case_when(
-        state == 2 ~ "Loss",
-        state %in% c(5, 6) ~ "Gain",
-        TRUE ~ NA_character_
-      )
-    ) %>%
-    dplyr::filter(
-      !is.na(cnv_type)
-    )
-
-  merged_regions <- hmm_regions %>%
-    dplyr::group_by(
-      chr,
-      cnv_type
-    ) %>%
-    dplyr::group_modify(
-      ~ merge_intervals(.x)
-    ) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(
-      region_size_mb = (end - start) / 1e6
-    )
-
-  chromosome_summary <- merged_regions %>%
-    dplyr::group_by(
-      chr,
-      cnv_type
-    ) %>%
-    dplyr::summarise(
-      altered_mb = sum(
-        region_size_mb
-      ),
-      .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-      sample = sample_name,
-      plot_mb = ifelse(
-        cnv_type == "Loss",
-        -altered_mb,
-        altered_mb
-      )
-    )
-
-  return(
-    list(
-      raw_regions = hmm_regions,
-      merged_regions = merged_regions,
-      chromosome_summary = chromosome_summary
-    )
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 25. Run HMM characterization
-#------------------------------------------------------------------------------
-
-hmm_results <- list()
-
-hmm_summary_files <- character(0)
-
-hmm_plot_files <- character(0)
-
-combined_chr_cnv <- data.frame()
-
-if (run_hmm_characterization &&
-    length(hmm_files) > 0) {
-  cat(
-    "\n------------------------------------------------------------\n",
-    "Characterizing HMM-predicted gains and losses\n",
-    "------------------------------------------------------------\n"
-  )
-
-  for (sample_name in names(hmm_files)) {
-    hmm_results[[sample_name]] <- analyze_hmm_regions(
-      hmm_file = hmm_files[[sample_name]],
-      sample_name = sample_titles[[sample_name]]
-    )
-
-    chromosome_summary <-
-      hmm_results[[sample_name]]$chromosome_summary
-
-    chromosome_summary$chr <- factor(
-      chromosome_summary$chr,
-      levels = paste0(
-        "chr",
-        1:19
-      )
-    )
-
-    current_plot <- ggplot2::ggplot(
-      chromosome_summary,
-      ggplot2::aes(
-        x = chr,
-        y = plot_mb,
-        fill = cnv_type
-      )
-    ) +
-      ggplot2::geom_col(
-        width = 0.8
-      ) +
-      ggplot2::geom_hline(
-        yintercept = 0
-      ) +
-      ggplot2::labs(
-        title = paste0(
-          sample_titles[[sample_name]],
-          " — inferred chromosome alterations"
-        ),
-        x = "Chromosome",
-        y = "Altered genomic region (Mb)",
-        fill = "CNV type"
-      ) +
-      ggplot2::theme_bw(
-        base_size = 12
-      ) +
-      ggplot2::theme(
-        axis.text.x = ggplot2::element_text(
-          angle = 45,
-          hjust = 1
-        )
-      )
-
-    current_plot_file <- file.path(
-      cnv_figure_directory,
-      paste0(
-        sample_name,
-        "_HMM_chromosome_profile.png"
-      )
-    )
-
-    ggplot2::ggsave(
-      filename = current_plot_file,
-      plot = current_plot,
-      width = 10,
-      height = 6,
-      dpi = 600
-    )
-
-    current_summary_file <- file.path(
-      cnv_results_directory,
-      paste0(
-        sample_name,
-        "_HMM_chromosome_summary.csv"
-      )
-    )
-
-    utils::write.csv(
-      chromosome_summary,
-      current_summary_file,
-      row.names = FALSE
-    )
-
-    hmm_plot_files <- c(
-      hmm_plot_files,
-      current_plot_file
-    )
-
-    hmm_summary_files <- c(
-      hmm_summary_files,
-      current_summary_file
-    )
-  }
-
-  combined_chr_cnv <- dplyr::bind_rows(
-    lapply(
-      names(hmm_results),
-      function(sample_name) {
-        hmm_results[[sample_name]]$chromosome_summary
-      }
-    )
-  )
-
-  combined_hmm_summary_file <- file.path(
-    cnv_results_directory,
-    "cross_sample_HMM_chromosome_summary.csv"
-  )
-
-  utils::write.csv(
-    combined_chr_cnv,
-    combined_hmm_summary_file,
-    row.names = FALSE
-  )
-} else {
-  combined_hmm_summary_file <- NULL
-
-  cat(
-    "\nHMM characterization skipped because no HMM region files were available.\n"
-  )
-}
-
-
-#==============================================================================
-# CONTINUOUS CHROMOSOME-LEVEL CNV DOSAGE
-#==============================================================================
-
-
-#------------------------------------------------------------------------------
-# 26. Define chromosome-level CNV dosage function
-#------------------------------------------------------------------------------
-
-calculate_chr_cnv_dosage <- function(
-    infercnv_object,
-    seurat_object,
-    sample_name,
-    annotation_column
-) {
   cnv_matrix <- infercnv_object@expr.data
 
   gene_order <- infercnv_object@gene_order
+
 
   common_genes <- intersect(
     rownames(cnv_matrix),
     rownames(gene_order)
   )
+
 
   cnv_matrix <- cnv_matrix[
     common_genes,
@@ -1540,15 +931,21 @@ calculate_chr_cnv_dosage <- function(
     drop = FALSE
   ]
 
-  metadata <- seurat_object@meta.data
 
-  observation_spots <- rownames(metadata)[
-    metadata[[annotation_column]] == observation_label
+  observation_spots <- colnames(
+    current_object
+  )[
+    current_object$infercnv_input_group ==
+      observation_label
   ]
 
-  reference_spots <- rownames(metadata)[
-    metadata[[annotation_column]] == reference_label
+  reference_spots <- colnames(
+    current_object
+  )[
+    current_object$infercnv_input_group ==
+      reference_label
   ]
+
 
   observation_spots <- intersect(
     observation_spots,
@@ -1560,1019 +957,521 @@ calculate_chr_cnv_dosage <- function(
     colnames(cnv_matrix)
   )
 
-  if (length(observation_spots) == 0) {
-    stop(
-      "No observation spots matched for ",
-      sample_name
-    )
-  }
-
-  if (length(reference_spots) == 0) {
-    stop(
-      "No reference spots matched for ",
-      sample_name
-    )
-  }
-
-  observation_mean <- rowMeans(
-    cnv_matrix[, observation_spots, drop = FALSE],
-    na.rm = TRUE
-  )
-
-  reference_mean <- rowMeans(
-    cnv_matrix[, reference_spots, drop = FALSE],
-    na.rm = TRUE
-  )
-
-  gene_results <- data.frame(
-    gene = common_genes,
-    chromosome = gene_order$chr,
-    observation_mean = observation_mean,
-    reference_mean = reference_mean,
-    cnv_difference =
-      observation_mean -
-      reference_mean,
-    stringsAsFactors = FALSE
-  )
-
-  chromosome_results <- gene_results %>%
-    dplyr::group_by(
-      chromosome
-    ) %>%
-    dplyr::summarise(
-      mean_cnv_difference = mean(
-        cnv_difference,
-        na.rm = TRUE
-      ),
-      median_cnv_difference = median(
-        cnv_difference,
-        na.rm = TRUE
-      ),
-      n_genes = dplyr::n(),
-      .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-      sample = sample_name
-    )
-
-  return(
-    list(
-      chromosome_results = chromosome_results,
-      gene_results = gene_results
-    )
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 27. Calculate chromosome-level dosage for all tumor slides
-#------------------------------------------------------------------------------
-
-dosage_results <- list()
-
-for (sample_name in tumor_samples) {
-  dosage_results[[sample_name]] <-
-    calculate_chr_cnv_dosage(
-      infercnv_object = infercnv_objects[[sample_name]],
-      seurat_object = seurat_objects[[sample_name]],
-      sample_name = sample_titles[[sample_name]],
-      annotation_column = annotation_column
-    )
-}
-
-chr_dosage_comparison <- dplyr::bind_rows(
-  lapply(
-    dosage_results,
-    function(x) x$chromosome_results
-  )
-)
-
-chr_dosage_comparison$chromosome <- factor(
-  chr_dosage_comparison$chromosome,
-  levels = paste0(
-    "chr",
-    1:19
-  )
-)
-
-chr_dosage_summary_file <- file.path(
-  cnv_results_directory,
-  "chromosome_CNV_dosage_summary.csv"
-)
-
-utils::write.csv(
-  chr_dosage_comparison,
-  chr_dosage_summary_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 28. Plot chromosome-level CNV dosage heatmap
-#------------------------------------------------------------------------------
-
-chr_dosage_heatmap <- ggplot2::ggplot(
-  chr_dosage_comparison,
-  ggplot2::aes(
-    x = chromosome,
-    y = sample,
-    fill = mean_cnv_difference
-  )
-) +
-  ggplot2::geom_tile(
-    color = "white",
-    linewidth = 0.5
-  ) +
-  ggplot2::scale_fill_gradient2(
-    low = "blue",
-    mid = "white",
-    high = "red",
-    midpoint = 0,
-    name = "CNV dosage\nΔ"
-  ) +
-  ggplot2::labs(
-    title = "Chromosome-level inferred CNV dosage",
-    subtitle = "Candidate tumor spots relative to reference spots",
-    x = "Chromosome",
-    y = NULL
-  ) +
-  ggplot2::theme_bw(
-    base_size = 12
-  ) +
-  ggplot2::theme(
-    axis.text.x = ggplot2::element_text(
-      angle = 45,
-      hjust = 1
-    )
-  )
-
-chr_dosage_heatmap_file <- file.path(
-  cnv_figure_directory,
-  "chromosome_CNV_dosage_heatmap.png"
-)
-
-ggplot2::ggsave(
-  filename = chr_dosage_heatmap_file,
-  plot = chr_dosage_heatmap,
-  width = 12,
-  height = 5,
-  dpi = 600
-)
-
-
-#==============================================================================
-# RECURRENT chr7 GAIN CHARACTERIZATION
-#==============================================================================
-
-
-#------------------------------------------------------------------------------
-# 29. Define gene-level CNV dosage function
-#------------------------------------------------------------------------------
-
-calculate_gene_cnv_dosage <- function(
-    infercnv_object,
-    seurat_object,
-    sample_name,
-    chr,
-    start,
-    end,
-    annotation_column
-) {
-  cnv_matrix <- infercnv_object@expr.data
-
-  gene_order <- infercnv_object@gene_order
-
-  if ("stop" %in% colnames(gene_order)) {
-    gene_end <- gene_order$stop
-  } else if ("end" %in% colnames(gene_order)) {
-    gene_end <- gene_order$end
-  } else {
-    stop(
-      "inferCNV gene_order does not contain 'stop' or 'end'."
-    )
-  }
-
-  region_genes <- rownames(gene_order)[
-    gene_order$chr == chr &
-    gene_order$start <= end &
-    gene_end >= start
-  ]
-
-  region_genes <- intersect(
-    region_genes,
-    rownames(cnv_matrix)
-  )
-
-  if (length(region_genes) == 0) {
-    warning(
-      "No genes were detected in the target region for ",
-      sample_name
-    )
-
-    return(
-      NULL
-    )
-  }
-
-  metadata <- seurat_object@meta.data
-
-  observation_spots <- rownames(metadata)[
-    metadata[[annotation_column]] == observation_label
-  ]
-
-  reference_spots <- rownames(metadata)[
-    metadata[[annotation_column]] == reference_label
-  ]
-
-  observation_spots <- intersect(
-    observation_spots,
-    colnames(cnv_matrix)
-  )
-
-  reference_spots <- intersect(
-    reference_spots,
-    colnames(cnv_matrix)
-  )
 
   observation_mean <- rowMeans(
     cnv_matrix[
-      region_genes,
+      ,
       observation_spots,
       drop = FALSE
     ],
     na.rm = TRUE
   )
 
+
   reference_mean <- rowMeans(
     cnv_matrix[
-      region_genes,
+      ,
       reference_spots,
       drop = FALSE
     ],
     na.rm = TRUE
   )
 
-  results <- data.frame(
-    gene = region_genes,
-    observation_mean = observation_mean,
-    reference_mean = reference_mean,
+
+  gene_dosage <- data.frame(
+    gene = common_genes,
+    chromosome = gene_order$chr,
     dosage_delta =
-      observation_mean -
-      reference_mean,
-    chr = gene_order[
-      region_genes,
-      "chr"
-    ],
-    start = gene_order[
-      region_genes,
-      "start"
-    ],
+      observation_mean - reference_mean,
+    sample = sample_titles[[sample_name]],
     stringsAsFactors = FALSE
   )
 
-  if ("stop" %in% colnames(gene_order)) {
-    results$end <- gene_order[
-      region_genes,
-      "stop"
-    ]
-  } else {
-    results$end <- gene_order[
-      region_genes,
-      "end"
-    ]
-  }
 
-  results$sample <- sample_name
-
-  return(
-    results
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 30. Run recurrent chr7 gene-level analysis
-#------------------------------------------------------------------------------
-
-gene_cnv_results <- dplyr::bind_rows(
-  lapply(
-    tumor_samples,
-    function(sample_name) {
-      calculate_gene_cnv_dosage(
-        infercnv_object = infercnv_objects[[sample_name]],
-        seurat_object = seurat_objects[[sample_name]],
-        sample_name = sample_titles[[sample_name]],
-        chr = target_chr,
-        start = target_start,
-        end = target_end,
-        annotation_column = annotation_column
-      )
-    }
-  )
-)
-
-chr7_gene_file <- NULL
-
-chr7_summary_file <- NULL
-
-chr7_plot_file <- NULL
-
-if (nrow(gene_cnv_results) > 0) {
-  chr7_gene_file <- file.path(
-    cnv_results_directory,
-    "chr7_gene_CNV_dosage.csv"
-  )
-
-  utils::write.csv(
-    gene_cnv_results,
-    chr7_gene_file,
-    row.names = FALSE
-  )
-
-  recurrent_gene_summary <- gene_cnv_results %>%
-    dplyr::group_by(
-      gene
+  chromosome_results[[sample_name]] <-
+    gene_dosage %>%
+    group_by(
+      chromosome,
+      sample
     ) %>%
-    dplyr::summarise(
+    summarise(
       mean_dosage_delta = mean(
         dosage_delta,
         na.rm = TRUE
       ),
-      min_dosage_delta = min(
-        dosage_delta,
-        na.rm = TRUE
-      ),
-      max_dosage_delta = max(
-        dosage_delta,
-        na.rm = TRUE
-      ),
-      positive_samples = sum(
-        dosage_delta > 0,
-        na.rm = TRUE
-      ),
+      n_genes = n(),
       .groups = "drop"
-    ) %>%
-    dplyr::arrange(
-      dplyr::desc(
-        positive_samples
-      ),
-      dplyr::desc(
-        mean_dosage_delta
-      )
     )
-
-  chr7_summary_file <- file.path(
-    cnv_results_directory,
-    "chr7_recurrent_gene_CNV_summary.csv"
-  )
-
-  utils::write.csv(
-    recurrent_gene_summary,
-    chr7_summary_file,
-    row.names = FALSE
-  )
-
-  gene_order_plot <- gene_cnv_results %>%
-    dplyr::group_by(
-      gene
-    ) %>%
-    dplyr::summarise(
-      start = min(
-        start,
-        na.rm = TRUE
-      ),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(
-      start
-    ) %>%
-    dplyr::pull(
-      gene
-    )
-
-  gene_cnv_results$gene <- factor(
-    gene_cnv_results$gene,
-    levels = gene_order_plot
-  )
-
-  chr7_plot <- ggplot2::ggplot(
-    gene_cnv_results,
-    ggplot2::aes(
-      x = gene,
-      y = dosage_delta,
-      fill = sample
-    )
-  ) +
-    ggplot2::geom_col(
-      position = ggplot2::position_dodge(
-        width = 0.8
-      ),
-      width = 0.75
-    ) +
-    ggplot2::geom_hline(
-      yintercept = 0
-    ) +
-    ggplot2::labs(
-      title = "Gene-level CNV dosage within recurrent chr7 gain",
-      subtitle =
-        "Candidate tumor spots relative to reference spots",
-      x = "Gene",
-      y = "CNV dosage Δ",
-      fill = "Sample"
-    ) +
-    ggplot2::theme_bw(
-      base_size = 12
-    ) +
-    ggplot2::theme(
-      axis.text.x = ggplot2::element_text(
-        angle = 60,
-        hjust = 1,
-        size = 8
-      )
-    )
-
-  chr7_plot_file <- file.path(
-    cnv_figure_directory,
-    "chr7_gene_CNV_dosage.png"
-  )
-
-  ggplot2::ggsave(
-    filename = chr7_plot_file,
-    plot = chr7_plot,
-    width = 16,
-    height = 7,
-    dpi = 600
-  )
-
-  cat(
-    "\nTop recurrent chr7 genes with positive dosage across samples:\n"
-  )
-
-  print(
-    recurrent_gene_summary %>%
-      dplyr::filter(
-        positive_samples ==
-        length(tumor_samples)
-      ) %>%
-      head(20)
-  )
-
-  if ("Hras" %in% as.character(gene_cnv_results$gene)) {
-    cat(
-      "\nHras CNV dosage:\n"
-    )
-
-    print(
-      gene_cnv_results %>%
-        dplyr::filter(
-          gene == "Hras"
-        )
-    )
-  }
 }
 
 
-#------------------------------------------------------------------------------
-# 31. Save annotated tumor-bearing Seurat objects
-#------------------------------------------------------------------------------
-
-annotated_tumor_object_files <- character(0)
-
-for (sample_name in tumor_samples) {
-  current_file <- file.path(
-    classified_object_directory,
-    paste0(
-      sample_name,
-      "_infercnv_classified_seurat.rds"
-    )
-  )
-
-  saveRDS(
-    object = seurat_objects[[sample_name]],
-    file = current_file,
-    compress = TRUE
-  )
-
-  annotated_tumor_object_files <- c(
-    annotated_tumor_object_files,
-    current_file
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 32. Initialize inferCNV metadata in master spatial object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Transferring inferCNV annotations to master spatial object\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_infercnv <- spatial_master
-
-spatial_infercnv$infercnv_input_group <- "Not assessed"
-
-spatial_infercnv$infercnv_score <- NA_real_
-
-spatial_infercnv$infercnv_threshold <- NA_real_
-
-spatial_infercnv$infercnv_status <- "Not assessed"
-
-spatial_infercnv$malignancy_annotation <- "Not assessed"
-
-infercnv_metadata_columns <- c(
-  "infercnv_input_group",
-  "infercnv_score",
-  "infercnv_threshold",
-  "infercnv_status",
-  "malignancy_annotation"
+chromosome_summary <- bind_rows(
+  chromosome_results
 )
 
 
-#------------------------------------------------------------------------------
-# 33. Define barcode-normalization helper
-#------------------------------------------------------------------------------
-
-normalize_spatial_barcode <- function(x) {
-  sub(
-    "^[^_]+_",
-    "",
-    x
+chromosome_summary$chromosome <- factor(
+  chromosome_summary$chromosome,
+  levels = paste0(
+    "chr",
+    1:19
   )
-}
-
-
-#------------------------------------------------------------------------------
-# 34. Transfer tumor inferCNV metadata by barcode
-#------------------------------------------------------------------------------
-
-transfer_summary <- data.frame()
-
-for (sample_name in tumor_samples) {
-  tumor_object <- seurat_objects[[sample_name]]
-
-  missing_columns <- setdiff(
-    infercnv_metadata_columns,
-    colnames(tumor_object@meta.data)
-  )
-
-  if (length(missing_columns) > 0) {
-    stop(
-      sample_name,
-      " is missing inferCNV metadata column(s): ",
-      paste(
-        missing_columns,
-        collapse = ", "
-      )
-    )
-  }
-
-  master_sample_spots <- colnames(spatial_infercnv)[
-    spatial_infercnv@meta.data[[sample_column]] ==
-      sample_name
-  ]
-
-  tumor_spots <- colnames(
-    tumor_object
-  )
-
-  direct_matches <- intersect(
-    master_sample_spots,
-    tumor_spots
-  )
-
-  if (length(direct_matches) > 0) {
-    spatial_infercnv@meta.data[
-      direct_matches,
-      infercnv_metadata_columns
-    ] <- tumor_object@meta.data[
-      direct_matches,
-      infercnv_metadata_columns
-    ]
-  }
-
-  unmatched_master <- setdiff(
-    master_sample_spots,
-    direct_matches
-  )
-
-  normalized_matches <- 0
-
-  if (length(unmatched_master) > 0) {
-    master_normalized <- normalize_spatial_barcode(
-      unmatched_master
-    )
-
-    tumor_normalized <- normalize_spatial_barcode(
-      tumor_spots
-    )
-
-    barcode_index <- match(
-      master_normalized,
-      tumor_normalized
-    )
-
-    matched_index <- which(
-      !is.na(barcode_index)
-    )
-
-    if (length(matched_index) > 0) {
-      master_matched <- unmatched_master[
-        matched_index
-      ]
-
-      tumor_matched <- tumor_spots[
-        barcode_index[
-          matched_index
-        ]
-      ]
-
-      spatial_infercnv@meta.data[
-        master_matched,
-        infercnv_metadata_columns
-      ] <- tumor_object@meta.data[
-        tumor_matched,
-        infercnv_metadata_columns
-      ]
-
-      normalized_matches <- length(
-        matched_index
-      )
-    }
-  }
-
-  scored_sample_spots <- spatial_infercnv$infercnv_score[
-    spatial_infercnv@meta.data[[sample_column]] ==
-      sample_name
-  ]
-
-  current_transfer_summary <- data.frame(
-    sample = sample_name,
-    master_spots = length(
-      master_sample_spots
-    ),
-    direct_matches = length(
-      direct_matches
-    ),
-    normalized_matches = normalized_matches,
-    scored_spots = sum(
-      !is.na(scored_sample_spots)
-    ),
-    stringsAsFactors = FALSE
-  )
-
-  transfer_summary <- dplyr::bind_rows(
-    transfer_summary,
-    current_transfer_summary
-  )
-}
-
-cat(
-  "\nMetadata transfer summary:\n"
 )
 
-print(
-  transfer_summary
-)
 
-transfer_summary_file <- file.path(
-  classification_results_directory,
-  "spatial_infercnv_metadata_transfer_summary.csv"
-)
-
-utils::write.csv(
-  transfer_summary,
-  transfer_summary_file,
+write.csv(
+  chromosome_summary,
+  file.path(
+    results_directory,
+    "chromosome_CNV_dosage_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 35. Validate final master inferCNV annotations
-#------------------------------------------------------------------------------
+# Use symmetric limits around zero so gains and losses
+# receive equivalent visual weight.
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Validating final inferCNV-annotated spatial object\n",
-  "------------------------------------------------------------\n"
+dosage_limit <- max(
+  abs(
+    chromosome_summary$mean_dosage_delta
+  ),
+  na.rm = TRUE
 )
 
-cat(
-  "\ninferCNV input groups by sample:\n"
-)
 
-print(
-  table(
-    spatial_infercnv@meta.data[[sample_column]],
-    spatial_infercnv$infercnv_input_group,
-    useNA = "ifany"
+chromosome_heatmap <- ggplot(
+  chromosome_summary,
+  aes(
+    x = chromosome,
+    y = sample,
+    fill = mean_dosage_delta
   )
-)
-
-cat(
-  "\ninferCNV status by sample:\n"
-)
-
-print(
-  table(
-    spatial_infercnv@meta.data[[sample_column]],
-    spatial_infercnv$infercnv_status,
-    useNA = "ifany"
-  )
-)
-
-cat(
-  "\nMalignancy annotation by sample:\n"
-)
-
-print(
-  table(
-    spatial_infercnv@meta.data[[sample_column]],
-    spatial_infercnv$malignancy_annotation,
-    useNA = "ifany"
-  )
-)
-
-normal_annotations <- spatial_infercnv$malignancy_annotation[
-  spatial_infercnv@meta.data[[sample_column]] ==
-    normal_sample
-]
-
-if (!all(normal_annotations == "Not assessed")) {
-  stop(
-    "Normal tissue contains unexpected inferCNV malignancy annotations."
-  )
-}
-
-if (anyDuplicated(colnames(spatial_infercnv)) > 0) {
-  stop(
-    "Duplicated spot barcodes detected in final spatial object."
-  )
-}
-
-expected_images <- c(
-  "Naive_A9",
-  "Niacin2_B5",
-  "Vehicle1_C5",
-  "Vehicle2_D5"
-)
-
-missing_images <- setdiff(
-  expected_images,
-  Seurat::Images(spatial_infercnv)
-)
-
-if (length(missing_images) > 0) {
-  stop(
-    "Spatial image(s) missing from final object:\n",
-    paste(
-      missing_images,
-      collapse = ", "
+) +
+  geom_tile(
+    color = "white",
+    linewidth = 0.5
+  ) +
+  scale_fill_gradient2(
+    low = dosage_low_color,
+    mid = dosage_mid_color,
+    high = dosage_high_color,
+    midpoint = 0,
+    limits = c(
+      -dosage_limit,
+      dosage_limit
+    ),
+    name = "CNV dosage\nΔ"
+  ) +
+  labs(
+    title = "Chromosome-level inferred CNV dosage",
+    subtitle = "Candidate tumor region relative to reference spots",
+    x = "Chromosome",
+    y = NULL
+  ) +
+  theme_bw(
+    base_size = 12
+  ) +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
     )
   )
-}
 
-cat(
-  "Final inferCNV-annotated spatial object validation passed.\n"
+
+print(
+  chromosome_heatmap
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "chromosome_CNV_dosage_heatmap.png"
+  ),
+  chromosome_heatmap,
+  width = 12,
+  height = 5,
+  dpi = 600
 )
 
 
 #------------------------------------------------------------------------------
-# 36. Save final master spatial object
+# 7. Transfer inferCNV classifications to the master object
+#------------------------------------------------------------------------------
+
+spatial_object$infercnv_input_group <-
+  "Not assessed"
+
+spatial_object$infercnv_score <-
+  NA_real_
+
+spatial_object$infercnv_zscore <-
+  NA_real_
+
+spatial_object$infercnv_threshold <-
+  NA_real_
+
+spatial_object$infercnv_status <-
+  "Not assessed"
+
+spatial_object$malignancy_annotation <-
+  "Not assessed"
+
+
+for (sample_name in tumor_samples) {
+
+  score_table <-
+    spot_results[[sample_name]]
+
+
+  master_spots <- colnames(
+    spatial_object
+  )[
+    spatial_object$sample == sample_name
+  ]
+
+
+  # Remove sample prefixes before matching barcodes
+
+  master_barcodes <- sub(
+    "^[^_]+_",
+    "",
+    master_spots
+  )
+
+  result_barcodes <- sub(
+    "^[^_]+_",
+    "",
+    score_table$spot
+  )
+
+
+  match_index <- match(
+    master_barcodes,
+    result_barcodes
+  )
+
+  matched <- !is.na(
+    match_index
+  )
+
+
+  matched_master_spots <-
+    master_spots[
+      matched
+    ]
+
+  matched_results <-
+    match_index[
+      matched
+    ]
+
+
+  spatial_object$infercnv_input_group[
+    matched_master_spots
+  ] <- score_table$infercnv_input_group[
+    matched_results
+  ]
+
+
+  spatial_object$infercnv_score[
+    matched_master_spots
+  ] <- score_table$infercnv_score[
+    matched_results
+  ]
+
+
+  spatial_object$infercnv_zscore[
+    matched_master_spots
+  ] <- score_table$infercnv_zscore[
+    matched_results
+  ]
+
+
+  spatial_object$infercnv_threshold[
+    matched_master_spots
+  ] <- score_table$infercnv_threshold[
+    matched_results
+  ]
+
+
+  spatial_object$infercnv_status[
+    matched_master_spots
+  ] <- score_table$infercnv_status[
+    matched_results
+  ]
+
+
+  spatial_object$malignancy_annotation[
+    matched_master_spots
+  ] <- score_table$malignancy_annotation[
+    matched_results
+  ]
+
+
+  message(
+    sample_name,
+    ": transferred ",
+    length(matched_master_spots),
+    " inferCNV classifications."
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 8. UMAP validation of cancer-spot classification
+#------------------------------------------------------------------------------
+
+if (!"umap" %in% names(
+  spatial_object@reductions
+)) {
+  stop("UMAP reduction was not found.")
+}
+
+
+#------------------------------------------------------------------------------
+# 8A. Reference-standardized inferCNV burden
+#------------------------------------------------------------------------------
+
+infercnv_zscore_umap <- FeaturePlot(
+  spatial_object,
+  features = "infercnv_zscore",
+  reduction = "umap",
+  pt.size = 0.7,
+  order = TRUE
+) +
+  scale_color_gradient2(
+    low = cnv_low_color,
+    mid = cnv_mid_color,
+    high = cnv_high_color,
+    midpoint = 0,
+    limits = cnv_z_limits,
+    oob = scales::squish,
+    na.value = "grey70",
+    name = "Relative CNV\nburden (z-score)"
+  ) +
+  labs(
+    title = "Reference-standardized inferCNV burden",
+    subtitle = paste(
+      "Standardized within each sample",
+      "using reference spots"
+    )
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5
+    )
+  )
+
+
+print(
+  infercnv_zscore_umap
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_UMAP_infercnv_reference_zscore.png"
+  ),
+  infercnv_zscore_umap,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 8B. Full malignancy classification
+#------------------------------------------------------------------------------
+
+malignancy_umap <- DimPlot(
+  spatial_object,
+  reduction = "umap",
+  group.by = "malignancy_annotation",
+  pt.size = 0.8
+) +
+  labs(
+    title = "inferCNV-derived malignancy classification"
+  )
+
+
+print(
+  malignancy_umap
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_UMAP_malignancy_classification.png"
+  ),
+  malignancy_umap,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 8C. Highlight malignant-enriched spots
+#------------------------------------------------------------------------------
+
+spatial_object$malignant_highlight <- ifelse(
+  spatial_object$malignancy_annotation ==
+    "Malignant-enriched",
+  "Malignant-enriched",
+  "Other spots"
+)
+
+
+spatial_object$malignant_highlight <- factor(
+  spatial_object$malignant_highlight,
+  levels = c(
+    "Other spots",
+    "Malignant-enriched"
+  )
+)
+
+
+malignant_umap <- DimPlot(
+  spatial_object,
+  reduction = "umap",
+  group.by = "malignant_highlight",
+  cols = c(
+    "Other spots" = "grey80",
+    "Malignant-enriched" = "#D73027"
+  ),
+  pt.size = 0.7,
+  order = "Malignant-enriched"
+) +
+  labs(
+    title = "Malignant-enriched spatial spots",
+    subtitle = paste(
+      sum(
+        spatial_object$malignant_highlight ==
+          "Malignant-enriched"
+      ),
+      paste(
+        "spots classified using tumor-region",
+        "location and inferCNV burden"
+      )
+    ),
+    color = NULL
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5
+    )
+  )
+
+
+print(
+  malignant_umap
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "spatial_UMAP_malignant_spots.png"
+  ),
+  malignant_umap,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+
+
+#------------------------------------------------------------------------------
+# 9. Save final object and metadata
 #------------------------------------------------------------------------------
 
 saveRDS(
-  object = spatial_infercnv,
-  file = final_master_object_file,
+  spatial_object,
+  output_file,
   compress = TRUE
 )
 
-if (!file.exists(final_master_object_file)) {
-  stop(
-    "Final inferCNV-annotated spatial object was not saved successfully."
-  )
-}
 
-
-#------------------------------------------------------------------------------
-# 37. Save complete inferCNV metadata table
-#------------------------------------------------------------------------------
-
-final_metadata <- spatial_infercnv@meta.data
+final_metadata <- spatial_object@meta.data
 
 final_metadata$spot <- rownames(
   final_metadata
 )
 
-utils::write.csv(
+
+write.csv(
   final_metadata,
-  final_metadata_file,
+  file.path(
+    results_directory,
+    "spatial_infercnv_final_metadata.csv"
+  ),
   row.names = FALSE
 )
 
-
-#------------------------------------------------------------------------------
-# 38. Save classification parameters
-#------------------------------------------------------------------------------
 
 classification_parameters <- data.frame(
   parameter = c(
-    "CNV_score_definition",
-    "reference_label",
-    "observation_label",
-    "threshold_quantile",
-    "malignant_definition",
-    "normal_tissue_status",
-    "chr7_target_region"
+    "CNV_score",
+    "CNV_high_threshold",
+    "malignant_classification",
+    "CNV_visualization"
   ),
   value = c(
-    "mean(abs(inferCNV_value - 1))",
-    reference_label,
-    observation_label,
-    threshold_quantile,
-    "observation AND CNV-high",
-    "Not assessed",
-    paste0(
-      target_chr,
-      ":",
-      target_start,
-      "-",
-      target_end
+    "mean(abs(inferCNV value - 1))",
+    paste(
+      "95th percentile of reference spots",
+      "within each sample"
+    ),
+    "observation spot AND CNV-high",
+    paste(
+      "CNV burden standardized to reference",
+      "mean and SD within each sample"
     )
-  ),
-  stringsAsFactors = FALSE
+  )
 )
 
-utils::write.csv(
+
+write.csv(
   classification_parameters,
-  parameter_file,
+  file.path(
+    results_directory,
+    "spatial_infercnv_classification_parameters.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 39. Validate expected Module 11 outputs
-#------------------------------------------------------------------------------
-
-expected_object_files <- c(
-  final_master_object_file,
-  annotated_tumor_object_files
-)
-
-expected_result_files <- c(
-  spot_score_files,
-  barcode_summary_file,
-  classification_summary_file,
-  transfer_summary_file,
-  final_metadata_file,
-  parameter_file,
-  chr_dosage_summary_file
-)
-
-if (!is.null(combined_hmm_summary_file)) {
-  expected_result_files <- c(
-    expected_result_files,
-    hmm_summary_files,
-    combined_hmm_summary_file
-  )
-}
-
-if (!is.null(chr7_gene_file)) {
-  expected_result_files <- c(
-    expected_result_files,
-    chr7_gene_file,
-    chr7_summary_file
-  )
-}
-
-expected_figure_files <- c(
-  cnv_score_plot_files,
-  combined_cnv_score_file,
-  cnv_spatial_plot_files,
-  cnv_status_plot_files,
-  malignancy_plot_files,
-  chr_dosage_heatmap_file,
-  hmm_plot_files
-)
-
-optional_combined_figures <- c(
-  combined_cnv_spatial_file,
-  combined_cnv_status_file,
-  combined_malignancy_file,
-  chr7_plot_file
-)
-
-optional_combined_figures <- optional_combined_figures[
-  !vapply(
-    optional_combined_figures,
-    is.null,
-    logical(1)
-  )
-]
-
-expected_figure_files <- c(
-  expected_figure_files,
-  optional_combined_figures
-)
-
-missing_object_files <- expected_object_files[
-  !file.exists(expected_object_files)
-]
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-if (length(missing_object_files) > 0) {
-  stop(
-    "One or more expected Module 11 object files were not created:\n",
-    paste(
-      missing_object_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 11 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 11 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 11 outputs were created successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 40. Final module summary
-#------------------------------------------------------------------------------
-
-malignant_spots <- sum(
-  spatial_infercnv$malignancy_annotation ==
-    "Malignant-enriched",
-  na.rm = TRUE
-)
-
-cnv_high_spots <- sum(
-  spatial_infercnv$infercnv_status ==
+n_cnv_high <- sum(
+  spatial_object$infercnv_status ==
     "CNV-high",
   na.rm = TRUE
 )
 
-cat(
-  "\n============================================================\n",
-  "MODULE 11 COMPLETE — Spatial inferCNV cancer-spot classification\n",
-  "============================================================\n",
-  "Tumor-bearing samples:    ", length(tumor_samples), "\n",
-  "Threshold quantile:       ", threshold_quantile, "\n",
-  "CNV-high spots:           ", cnv_high_spots, "\n",
-  "Malignant-enriched spots: ", malignant_spots, "\n",
-  "Normal tissue:            Not assessed\n",
-  "HMM files analyzed:       ", length(hmm_results), "\n",
-  "\n",
-  "Primary downstream object:\n",
-  "  ", final_master_object_file, "\n",
-  "\n",
-  "Sample-level classified objects:\n",
-  "  ", classified_object_directory, "\n",
-  "\n",
-  "Classification tables:\n",
-  "  ", classification_results_directory, "\n",
-  "\n",
-  "CNV characterization tables:\n",
-  "  ", cnv_results_directory, "\n",
-  "\n",
-  "Classification figures:\n",
-  "  ", classification_figure_directory, "\n",
-  "\n",
-  "CNV characterization figures:\n",
-  "  ", cnv_figure_directory, "\n",
-  "\n",
-  "Next module:\n",
-  "  Spatial SingleR annotation / downstream spatial analyses\n",
-  "============================================================\n\n",
-  sep = ""
+n_malignant <- sum(
+  spatial_object$malignancy_annotation ==
+    "Malignant-enriched",
+  na.rm = TRUE
+)
+
+
+message(
+  "Module 10 complete: ",
+  n_cnv_high,
+  " CNV-high spots; ",
+  n_malignant,
+  " malignant-enriched spots."
 )
 ```
 

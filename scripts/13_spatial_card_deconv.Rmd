@@ -8,18 +8,17 @@ date: "2026-08-12"
 #==============================================================================
 # MODULE 13 — Spatial CARD cell-type deconvolution
 #==============================================================================
-
-# Purpose:
-#   Perform CARD spatial cell-type deconvolution using the SingleR-annotated
-#   scRNA-seq reference generated in Module 04 and the final inferCNV +
-#   SingleR spatial Seurat object generated in Module 12.
 #
-#   CARD is run independently on each Visium slide using raw scRNA-seq RNA
-#   counts, fine SingleR reference labels, raw Spatial counts, and spatial
-#   tissue coordinates. Estimated cell-type proportions are saved, mapped
-#   back into the master spatial Seurat object, summarized using the top three
-#   predicted cell types per spot, visualized spatially, and saved as a final
-#   reusable inferCNV + SingleR + CARD spatial checkpoint.
+# Purpose:
+#   Estimate cell-type proportions within Visium spots using CARD and the
+#   SingleR-annotated scRNA-seq reference generated upstream.
+#
+# CARD is run independently for each tissue section because each slide has its
+# own spatial coordinate system. Results are then combined across samples and
+# transferred to the master spatial Seurat object.
+#
+# CARD estimates model-based cell-type proportions. These values should not be
+# interpreted as direct cell counts or definitive pure spot identities.
 #
 # Inputs:
 #   data/processed/single_cell/
@@ -28,56 +27,14 @@ date: "2026-08-12"
 #   data/processed/spatial/
 #     spatial_tumor_final_infercnv_singleR.rds
 #
-# Primary CARD objects:
-#   data/processed/spatial/CARD/
-#
-# Final CARD-annotated spatial object:
+# Output:
 #   data/processed/spatial/
-#     spatial_tumor_final_infercnV_singleR_CARD.rds
-#
-# Output tables:
-#   results/spatial/CARD/
-#   results/spatial/CARD/per_sample/
-#
-# Output figures:
-#   figures/spatial/CARD/
-#   figures/spatial/CARD/SpatialFeaturePlots/
-#
-# CARD reference:
-#   Assay:             RNA
-#   Cell-type column:  SingleR_fine_pruned
-#
-# CARD spatial input:
-#   Assay:             Spatial
-#   Sample column:     sample
-#
-# CARD filtering:
-#   minCountGene:      200
-#   minCountSpot:      50
-#
-# Derived CARD metadata:
-#   CARD_identity
-#   CARD_max_score
-#   CARD_second_identity
-#   CARD_second_score
-#   CARD_third_identity
-#   CARD_third_score
-#   CARD_margin
-#   CARD_top3_total
-#   CARD_top3_label
-#   CARD_<cell_type>
-#
-# Notes:
-#   - CARD estimates proportional cell-type contributions within each Visium
-#     spot. These are model-based composition estimates, not direct cell counts.
-#   - CARD proportions should not be interpreted as proof of a single pure cell
-#     identity within a spatial spot.
-#   - Raw counts are required for both the scRNA-seq reference and spatial data.
+#     spatial_tumor_final_infercnv_singleR_CARD.rds
 #==============================================================================
 
 
 #------------------------------------------------------------------------------
-# 1. Load required packages
+# 1. Setup
 #------------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -87,45 +44,26 @@ suppressPackageStartupMessages({
   library(Matrix)
   library(dplyr)
   library(tidyr)
+  library(tibble)
   library(ggplot2)
-  library(patchwork)
   library(scales)
   library(here)
 })
 
-
-#------------------------------------------------------------------------------
-# 2. Reproducibility settings
-#------------------------------------------------------------------------------
-
 set.seed(1234)
 
 
-#------------------------------------------------------------------------------
-# 3. Define analysis parameters
-#------------------------------------------------------------------------------
+# Analysis settings
 
 reference_assay <- "RNA"
-
-reference_cell_type_column <- "SingleR_fine_pruned"
-
+reference_cell_type_column <- "SingleR_broad_pruned"
 reference_sample_column <- "sample"
 
 spatial_assay <- "Spatial"
-
 spatial_sample_column <- "sample"
 
-minimum_shared_genes <- 1000
-
 CARD_min_count_gene <- 200
-
 CARD_min_count_spot <- 50
-
-run_CARD_imputation <- FALSE
-
-CARD_num_grids <- 2000
-
-CARD_num_neighbors <- 10
 
 
 sample_order <- c(
@@ -152,26 +90,26 @@ sample_titles <- c(
 )
 
 
-selected_CARD_cell_types <- c(
-  "Macrophages",
-  "Macrophages activated",
-  "Microglia",
-  "Microglia activated",
-  "Monocytes"
+# Continuous color scale used by CARD-native proportion maps.
+
+card_proportion_colors <- c(
+  "cornflowerblue",
+  "cornsilk",
+  "red"
 )
 
 
 #------------------------------------------------------------------------------
-# 4. Define repository paths
+# 2. Repository paths
 #------------------------------------------------------------------------------
 
-single_cell_processed_directory <- here::here(
+single_cell_directory <- here::here(
   "data",
   "processed",
   "single_cell"
 )
 
-spatial_processed_directory <- here::here(
+spatial_directory <- here::here(
   "data",
   "processed",
   "spatial"
@@ -190,291 +128,126 @@ results_directory <- here::here(
   "CARD"
 )
 
-per_sample_results_directory <- here::here(
-  "results",
-  "spatial",
-  "CARD",
-  "per_sample"
-)
-
 figure_directory <- here::here(
   "figures",
   "spatial",
   "CARD"
 )
 
-spatial_feature_directory <- here::here(
-  "figures",
-  "spatial",
-  "CARD",
-  "SpatialFeaturePlots"
-)
 
-
-directories_to_create <- c(
+dir.create(
   CARD_object_directory,
-  results_directory,
-  per_sample_results_directory,
-  figure_directory,
-  spatial_feature_directory
+  recursive = TRUE,
+  showWarnings = FALSE
 )
 
-for (directory in directories_to_create) {
-  dir.create(
-    directory,
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-}
+dir.create(
+  results_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
+dir.create(
+  figure_directory,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
-#------------------------------------------------------------------------------
-# 5. Define input and output files
-#------------------------------------------------------------------------------
 
 reference_file <- file.path(
-  single_cell_processed_directory,
+  single_cell_directory,
   "GSE298688_SingleR_annotated_seurat.rds"
 )
 
 spatial_file <- file.path(
-  spatial_processed_directory,
+  spatial_directory,
   "spatial_tumor_final_infercnv_singleR.rds"
 )
 
+CARD_results_file <- file.path(
+  CARD_object_directory,
+  "spatial_CARD_results.rds"
+)
+
 final_CARD_object_file <- file.path(
-  spatial_processed_directory,
+  spatial_directory,
   "spatial_tumor_final_infercnv_singleR_CARD.rds"
 )
 
-all_CARD_results_file <- file.path(
-  CARD_object_directory,
-  "spatial_CARD_all_results.rds"
-)
-
-all_CARD_identities_file <- file.path(
-  CARD_object_directory,
-  "spatial_CARD_top3_identities.rds"
-)
-
-reference_metadata_file <- file.path(
-  results_directory,
-  "CARD_reference_metadata.csv"
-)
-
-reference_summary_file <- file.path(
-  results_directory,
-  "CARD_reference_summary.csv"
-)
-
-shared_gene_summary_file <- file.path(
-  results_directory,
-  "CARD_shared_gene_summary.csv"
-)
-
-top3_summary_file <- file.path(
-  results_directory,
-  "CARD_top3_spot_summary.csv"
-)
-
-identity_summary_file <- file.path(
-  results_directory,
-  "CARD_identity_by_sample.csv"
-)
-
-metadata_file <- file.path(
-  results_directory,
-  "spatial_infercnv_singleR_CARD_metadata.csv"
-)
-
-parameter_file <- file.path(
-  results_directory,
-  "CARD_parameters.csv"
-)
-
-
-cat(
-  "\n============================================================\n",
-  "MODULE 14 — Spatial CARD deconvolution\n",
-  "============================================================\n",
-  "Repository root:       ", here::here(), "\n",
-  "scRNA reference:       ", reference_file, "\n",
-  "Spatial input:         ", spatial_file, "\n",
-  "CARD objects:          ", CARD_object_directory, "\n",
-  "Results directory:    ", results_directory, "\n",
-  "Figure directory:     ", figure_directory, "\n",
-  "Final spatial object: ", final_CARD_object_file, "\n",
-  "============================================================\n\n",
-  sep = ""
-)
-
 
 #------------------------------------------------------------------------------
-# 6. Validate required upstream files
+# 3. Load reference and spatial objects
 #------------------------------------------------------------------------------
 
-required_input_files <- c(
-  reference_file,
-  spatial_file
-)
-
-missing_input_files <- required_input_files[
-  !file.exists(required_input_files)
-]
-
-if (length(missing_input_files) > 0) {
+if (!file.exists(reference_file)) {
   stop(
-    "Required CARD input file(s) were not found:\n",
-    paste(
-      missing_input_files,
-      collapse = "\n"
-    )
+    "Single-cell reference was not found: ",
+    reference_file
   )
 }
 
-cat(
-  "Required CARD input files were found.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 7. Load SingleR-annotated scRNA-seq reference
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Loading SingleR-annotated scRNA-seq reference\n",
-  "------------------------------------------------------------\n"
-)
-
-reference_object <- readRDS(
-  reference_file
-)
-
-if (!inherits(reference_object, "Seurat")) {
+if (!file.exists(spatial_file)) {
   stop(
-    "Single-cell reference is not a valid Seurat object."
+    "Spatial object was not found: ",
+    spatial_file
   )
 }
+
+
+reference_object <- readRDS(reference_file)
+spatial_object <- readRDS(spatial_file)
+
 
 if (!reference_assay %in% names(reference_object@assays)) {
   stop(
-    "Reference assay was not found: ",
-    reference_assay
+    "RNA assay was not found in the single-cell reference."
   )
 }
 
-if (!reference_cell_type_column %in%
-    colnames(reference_object@meta.data)) {
+if (!reference_cell_type_column %in% colnames(reference_object@meta.data)) {
   stop(
-    "CARD reference cell-type column was not found: ",
+    "SingleR reference annotation was not found: ",
     reference_cell_type_column
-  )
-}
-
-cat(
-  "Reference object loaded successfully:\n",
-  "  Genes: ", nrow(reference_object), "\n",
-  "  Cells: ", ncol(reference_object), "\n",
-  sep = ""
-)
-
-
-#------------------------------------------------------------------------------
-# 8. Load final spatial Seurat object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Loading final spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_object <- readRDS(
-  spatial_file
-)
-
-if (!inherits(spatial_object, "Seurat")) {
-  stop(
-    "Spatial input file is not a valid Seurat object."
   )
 }
 
 if (!spatial_assay %in% names(spatial_object@assays)) {
   stop(
-    "Spatial assay was not found: ",
-    spatial_assay
+    "Spatial assay was not found."
   )
 }
 
-if (!spatial_sample_column %in%
-    colnames(spatial_object@meta.data)) {
+if (!spatial_sample_column %in% colnames(spatial_object@meta.data)) {
   stop(
-    "Spatial sample column was not found: ",
-    spatial_sample_column
+    "Spatial sample metadata was not found."
   )
 }
 
-cat(
-  "Spatial object loaded successfully:\n",
-  "  Genes:  ", nrow(spatial_object), "\n",
-  "  Spots:  ", ncol(spatial_object), "\n",
-  "  Slides: ",
-  length(
-    unique(
-      spatial_object@meta.data[[spatial_sample_column]]
-    )
-  ),
-  "\n",
-  sep = ""
+
+message(
+  "Single-cell reference: ",
+  ncol(reference_object),
+  " cells."
 )
 
-cat(
-  "\nSpatial samples:\n"
-)
-
-print(
-  table(
-    spatial_object@meta.data[[spatial_sample_column]]
-  )
-)
-
-cat(
-  "\nSpatial images:\n"
-)
-
-print(
-  Seurat::Images(
-    spatial_object
-  )
+message(
+  "Spatial dataset: ",
+  ncol(spatial_object),
+  " spots."
 )
 
 
 #------------------------------------------------------------------------------
-# 9. Prepare scRNA-seq reference counts
+# 4. Prepare scRNA-seq reference
 #------------------------------------------------------------------------------
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Preparing scRNA-seq CARD reference counts\n",
-  "------------------------------------------------------------\n"
-)
+DefaultAssay(reference_object) <- reference_assay
 
-Seurat::DefaultAssay(
-  reference_object
-) <- reference_assay
 
 reference_layers <- SeuratObject::Layers(
   reference_object[[reference_assay]]
 )
 
-cat(
-  "Reference RNA assay layers:\n"
-)
-
-print(
-  reference_layers
-)
 
 reference_count_layers <- grep(
   "^counts",
@@ -482,18 +255,8 @@ reference_count_layers <- grep(
   value = TRUE
 )
 
-if (length(reference_count_layers) == 0) {
-  stop(
-    "No raw RNA counts layer was found in the scRNA-seq reference."
-  )
-}
 
 if (length(reference_count_layers) > 1) {
-  cat(
-    "Multiple reference RNA count layers detected.\n",
-    "Joining RNA layers...\n",
-    sep = ""
-  )
 
   reference_object <- SeuratObject::JoinLayers(
     reference_object,
@@ -501,28 +264,13 @@ if (length(reference_count_layers) > 1) {
   )
 }
 
+
 reference_counts <- SeuratObject::LayerData(
-  object = reference_object,
+  reference_object,
   assay = reference_assay,
   layer = "counts"
 )
 
-reference_counts <- methods::as(
-  reference_counts,
-  "dgCMatrix"
-)
-
-if (nrow(reference_counts) == 0 ||
-    ncol(reference_counts) == 0) {
-  stop(
-    "Reference raw count matrix is empty."
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 10. Construct CARD reference metadata
-#------------------------------------------------------------------------------
 
 reference_cell_types <- as.character(
   reference_object@meta.data[
@@ -531,28 +279,38 @@ reference_cell_types <- as.character(
   ]
 )
 
-if (reference_sample_column %in%
-    colnames(reference_object@meta.data)) {
+
+# Remove uncertain or missing SingleR annotations.
+
+valid_reference <- !is.na(reference_cell_types) &
+  reference_cell_types != "" &
+  reference_cell_types != "Unassigned" &
+  reference_cell_types != "Uncertain"
+
+
+reference_counts <- reference_counts[, valid_reference, drop = FALSE]
+reference_cell_types <- reference_cell_types[valid_reference]
+
+
+# CARD uses sample information from the single-cell reference.
+
+if (reference_sample_column %in% colnames(reference_object@meta.data)) {
+
   reference_sample_info <- as.character(
     reference_object@meta.data[
       colnames(reference_counts),
       reference_sample_column
     ]
   )
-} else if ("orig.ident" %in%
-           colnames(reference_object@meta.data)) {
-  reference_sample_info <- as.character(
-    reference_object@meta.data[
-      colnames(reference_counts),
-      "orig.ident"
-    ]
-  )
+
 } else {
+
   reference_sample_info <- rep(
-    "Reference",
+    "reference",
     ncol(reference_counts)
   )
 }
+
 
 reference_metadata <- data.frame(
   cellType = reference_cell_types,
@@ -562,231 +320,124 @@ reference_metadata <- data.frame(
 )
 
 
-#------------------------------------------------------------------------------
-# 11. Remove invalid reference annotations
-#------------------------------------------------------------------------------
-
-invalid_reference_labels <- c(
-  "",
-  "Uncertain",
-  "Unassigned",
-  "Unknown",
-  "NA"
-)
-
-valid_reference_cells <- rownames(reference_metadata)[
-  !is.na(reference_metadata$cellType) &
-  !reference_metadata$cellType %in%
-    invalid_reference_labels
-]
-
-reference_metadata <- reference_metadata[
-  valid_reference_cells,
-  ,
-  drop = FALSE
-]
-
-reference_counts <- reference_counts[
-  ,
-  valid_reference_cells,
-  drop = FALSE
-]
-
-if (!identical(
-  colnames(reference_counts),
-  rownames(reference_metadata)
-)) {
-  stop(
-    "Reference counts and CARD metadata are not aligned."
+reference_summary <- reference_metadata %>%
+  dplyr::count(
+    cellType,
+    name = "n_cells"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_cells)
   )
-}
 
 
-#------------------------------------------------------------------------------
-# 12. Summarize CARD reference
-#------------------------------------------------------------------------------
+print(reference_summary)
 
-reference_cell_types <- sort(
-  unique(
-    reference_metadata$cellType
-  )
-)
 
-reference_cell_type_counts <- sort(
-  table(
-    reference_metadata$cellType
-  ),
-  decreasing = TRUE
-)
-
-cat(
-  "\nCARD reference summary:\n",
-  "  Genes:      ", nrow(reference_counts), "\n",
-  "  Cells:      ", ncol(reference_counts), "\n",
-  "  Cell types: ", length(reference_cell_types), "\n",
-  sep = ""
-)
-
-cat(
-  "\nReference cell-type counts:\n"
-)
-
-print(
-  reference_cell_type_counts
-)
-
-reference_summary <- data.frame(
-  cell_type = names(reference_cell_type_counts),
-  cells = as.integer(reference_cell_type_counts),
-  stringsAsFactors = FALSE
-)
-
-utils::write.csv(
+write.csv(
   reference_summary,
-  reference_summary_file,
-  row.names = FALSE
-)
-
-reference_metadata_export <- reference_metadata
-
-reference_metadata_export$cell <- rownames(
-  reference_metadata_export
-)
-
-utils::write.csv(
-  reference_metadata_export,
-  reference_metadata_file,
+  file.path(
+    results_directory,
+    "CARD_reference_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 13. Define function to extract CARD-compatible coordinates
+# 5. Extract CARD-compatible spatial coordinates
 #------------------------------------------------------------------------------
 
-get_CARD_coordinates <- function(
-    sample_object,
-    image_name
-) {
+get_CARD_coordinates <- function(sample_object, image_name) {
+
   coordinates <- Seurat::GetTissueCoordinates(
     sample_object,
     image = image_name
   )
 
-  coordinates <- as.data.frame(
-    coordinates
-  )
 
-  if (all(c("x", "y") %in% colnames(coordinates))) {
-    coordinates <- coordinates[
-      ,
-      c("x", "y"),
-      drop = FALSE
-    ]
+  coordinate_names <- colnames(coordinates)
 
-  } else if (all(
-    c("imagecol", "imagerow") %in%
-      colnames(coordinates)
-  )) {
-    coordinates <- coordinates[
+
+  if (all(c("x", "y") %in% coordinate_names)) {
+
+    CARD_coordinates <- coordinates[, c("x", "y"), drop = FALSE]
+
+  } else if (all(c("imagerow", "imagecol") %in% coordinate_names)) {
+
+    CARD_coordinates <- coordinates[
       ,
       c("imagecol", "imagerow"),
       drop = FALSE
     ]
 
-    colnames(coordinates) <- c(
+    colnames(CARD_coordinates) <- c(
       "x",
       "y"
     )
 
-  } else if (all(
-    c("col", "row") %in%
-      colnames(coordinates)
-  )) {
-    coordinates <- coordinates[
-      ,
-      c("col", "row"),
-      drop = FALSE
-    ]
+  } else if (all(c("row", "col") %in% coordinate_names)) {
 
-    colnames(coordinates) <- c(
+    CARD_coordinates <- coordinates[, c("col", "row"), drop = FALSE]
+
+    colnames(CARD_coordinates) <- c(
       "x",
       "y"
     )
 
   } else {
+
     stop(
-      "Could not identify CARD-compatible x/y coordinate columns.\n",
-      "Available columns: ",
-      paste(
-        colnames(coordinates),
-        collapse = ", "
-      )
+      "Could not identify CARD-compatible spatial coordinates."
     )
   }
 
-  return(
-    coordinates
-  )
+
+  CARD_coordinates
 }
 
 
 #------------------------------------------------------------------------------
-# 14. Define function to run CARD on one spatial slide
+# 6. Run CARD independently for each tissue section
 #------------------------------------------------------------------------------
 
-run_CARD_sample <- function(
-    spatial_object,
-    sample_name,
-    reference_counts,
-    reference_metadata,
-    reference_cell_types,
-    spatial_assay,
-    spatial_sample_column,
-    image_name,
-    CARD_object_directory,
-    per_sample_results_directory,
-    min_count_gene,
-    min_count_spot,
-    minimum_shared_genes
-) {
+CARD_results <- list()
 
-  cat(
-    "\n============================================================\n",
-    "RUNNING CARD — ",
-    sample_name,
-    "\n",
-    "============================================================\n",
-    sep = ""
+
+available_samples <- unique(
+  spatial_object@meta.data[[spatial_sample_column]]
+)
+
+
+for (sample_name in sample_order) {
+
+  if (!sample_name %in% available_samples) {
+    next
+  }
+
+
+  message(
+    "Running CARD: ",
+    sample_name
   )
 
 
-  #--------------------------------------------------------------------------
-  # Subset sample
-  #--------------------------------------------------------------------------
-
   sample_spots <- colnames(spatial_object)[
-    spatial_object@meta.data[[spatial_sample_column]] ==
-      sample_name
+    spatial_object@meta.data[[spatial_sample_column]] == sample_name
   ]
 
-  if (length(sample_spots) == 0) {
-    warning(
-      "No spatial spots were found for ",
-      sample_name
-    )
-
-    return(NULL)
-  }
 
   sample_object <- subset(
     spatial_object,
     cells = sample_spots
   )
 
-  if (!image_name %in% Seurat::Images(sample_object)) {
+
+  image_name <- sample_images[[sample_name]]
+
+
+  if (!image_name %in% names(sample_object@images)) {
     stop(
-      "Expected spatial image was not found for ",
+      "Spatial image was not found for ",
       sample_name,
       ": ",
       image_name
@@ -794,13 +445,12 @@ run_CARD_sample <- function(
   }
 
 
-  #--------------------------------------------------------------------------
-  # Prepare raw Spatial counts
-  #--------------------------------------------------------------------------
+  # Prepare raw Spatial counts.
 
   sample_layers <- SeuratObject::Layers(
     sample_object[[spatial_assay]]
   )
+
 
   sample_count_layers <- grep(
     "^counts",
@@ -808,949 +458,539 @@ run_CARD_sample <- function(
     value = TRUE
   )
 
-  if (length(sample_count_layers) == 0) {
-    stop(
-      "No raw Spatial counts were found for ",
-      sample_name
-    )
-  }
 
   if (length(sample_count_layers) > 1) {
+
     sample_object <- SeuratObject::JoinLayers(
       sample_object,
       assay = spatial_assay
     )
   }
 
+
   spatial_counts <- SeuratObject::LayerData(
-    object = sample_object,
+    sample_object,
     assay = spatial_assay,
     layer = "counts"
   )
 
-  spatial_counts <- methods::as(
-    spatial_counts,
-    "dgCMatrix"
+
+  # Extract tissue coordinates.
+
+  spatial_coordinates <- get_CARD_coordinates(
+    sample_object,
+    image_name
   )
 
-
-  #--------------------------------------------------------------------------
-  # Extract coordinates
-  #--------------------------------------------------------------------------
-
-  coordinates <- get_CARD_coordinates(
-    sample_object = sample_object,
-    image_name = image_name
-  )
 
   common_spots <- intersect(
     colnames(spatial_counts),
-    rownames(coordinates)
+    rownames(spatial_coordinates)
   )
+
 
   if (length(common_spots) == 0) {
     stop(
-      "No matching count/coordinate barcodes were found for ",
-      sample_name
+      "No matching spatial counts and coordinates for ",
+      sample_name,
+      "."
     )
   }
 
-  spatial_counts <- spatial_counts[
-    ,
-    common_spots,
-    drop = FALSE
-  ]
 
-  coordinates <- coordinates[
+  spatial_counts <- spatial_counts[, common_spots, drop = FALSE]
+
+  spatial_coordinates <- spatial_coordinates[
     common_spots,
     ,
     drop = FALSE
   ]
 
-  if (!identical(
-    colnames(spatial_counts),
-    rownames(coordinates)
-  )) {
-    stop(
-      "Spatial counts and coordinates are not aligned for ",
-      sample_name
-    )
-  }
 
-
-  #--------------------------------------------------------------------------
-  # Match genes between reference and spatial data
-  #--------------------------------------------------------------------------
+  # Restrict reference and spatial matrices to shared genes.
 
   shared_genes <- intersect(
     rownames(reference_counts),
     rownames(spatial_counts)
   )
 
-  cat(
-    "\nCARD input:\n",
-    "  Spatial spots: ", ncol(spatial_counts), "\n",
-    "  Shared genes:  ", length(shared_genes), "\n",
-    sep = ""
-  )
-
-  if (length(shared_genes) < minimum_shared_genes) {
-    warning(
-      "Only ",
-      length(shared_genes),
-      " shared genes were found for ",
-      sample_name
-    )
-  }
 
   if (length(shared_genes) == 0) {
     stop(
       "No shared genes were available for CARD in ",
-      sample_name
+      sample_name,
+      "."
     )
   }
 
-  sc_counts <- reference_counts[
+
+  sample_reference_counts <- reference_counts[
     shared_genes,
     ,
     drop = FALSE
   ]
 
-  spatial_counts <- spatial_counts[
+
+  sample_spatial_counts <- spatial_counts[
     shared_genes,
     ,
     drop = FALSE
   ]
 
 
-  #--------------------------------------------------------------------------
-  # Create CARD object
-  #--------------------------------------------------------------------------
-
-  cat(
-    "Creating CARD object...\n"
+  message(
+    sample_name,
+    ": ",
+    length(common_spots),
+    " spots and ",
+    length(shared_genes),
+    " shared genes."
   )
+
+
+  # Create CARD object.
 
   CARD_object <- CARD::createCARDObject(
-    sc_count = sc_counts,
+    sc_count = sample_reference_counts,
     sc_meta = reference_metadata,
-    spatial_count = spatial_counts,
-    spatial_location = coordinates,
+    spatial_count = sample_spatial_counts,
+    spatial_location = spatial_coordinates,
     ct.varname = "cellType",
-    ct.select = reference_cell_types,
+    ct.select = unique(reference_metadata$cellType),
     sample.varname = "sampleInfo",
-    minCountGene = min_count_gene,
-    minCountSpot = min_count_spot
+    minCountGene = CARD_min_count_gene,
+    minCountSpot = CARD_min_count_spot
   )
 
 
-  #--------------------------------------------------------------------------
-  # Run CARD deconvolution
-  #--------------------------------------------------------------------------
-
-  cat(
-    "Running CARD deconvolution...\n"
-  )
+  # Run CARD deconvolution.
 
   CARD_object <- CARD::CARD_deconvolution(
     CARD_object = CARD_object
   )
 
 
-  #--------------------------------------------------------------------------
-  # Extract CARD proportions
-  #--------------------------------------------------------------------------
-
   proportions <- as.data.frame(
     CARD_object@Proportion_CARD,
     check.names = FALSE
   )
 
-  if (nrow(proportions) == 0 ||
-      ncol(proportions) == 0) {
+
+  if (nrow(proportions) == 0 || ncol(proportions) == 0) {
     stop(
       "CARD returned an empty proportion matrix for ",
-      sample_name
+      sample_name,
+      "."
     )
   }
 
-  cat(
-    "\nCARD completed:\n",
-    "  Spots:      ", nrow(proportions), "\n",
-    "  Cell types: ", ncol(proportions), "\n",
-    sep = ""
+
+  CARD_results[[sample_name]] <- list(
+    CARD_object = CARD_object,
+    proportions = proportions,
+    coordinates = spatial_coordinates,
+    shared_genes = shared_genes
   )
 
-  cat(
-    "\nEstimated proportion sums per spot:\n"
-  )
-
-  print(
-    summary(
-      rowSums(
-        proportions
-      )
-    )
-  )
-
-
-  #--------------------------------------------------------------------------
-  # Save per-sample CARD outputs
-  #--------------------------------------------------------------------------
-
-  proportion_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CARD_proportions.csv"
-    )
-  )
-
-  shared_gene_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CARD_shared_genes.csv"
-    )
-  )
-
-  object_file <- file.path(
-    CARD_object_directory,
-    paste0(
-      sample_name,
-      "_CARD_object.rds"
-    )
-  )
-
-  proportions_export <- proportions
-
-  proportions_export$spot <- rownames(
-    proportions_export
-  )
-
-  utils::write.csv(
-    proportions_export,
-    proportion_file,
-    row.names = FALSE
-  )
-
-  shared_gene_table <- data.frame(
-    gene = shared_genes,
-    stringsAsFactors = FALSE
-  )
-
-  utils::write.csv(
-    shared_gene_table,
-    shared_gene_file,
-    row.names = FALSE
-  )
 
   saveRDS(
-    object = CARD_object,
-    file = object_file,
+    CARD_object,
+    file.path(
+      CARD_object_directory,
+      paste0(
+        sample_name,
+        "_CARD_object.rds"
+      )
+    ),
     compress = TRUE
   )
 
 
-  #--------------------------------------------------------------------------
-  # Validate saved outputs
-  #--------------------------------------------------------------------------
-
-  if (!file.exists(proportion_file)) {
-    stop(
-      "CARD proportion file was not saved for ",
-      sample_name
-    )
-  }
-
-  if (!file.exists(object_file)) {
-    stop(
-      "CARD object was not saved for ",
-      sample_name
-    )
-  }
-
-
-  #--------------------------------------------------------------------------
-  # Return results
-  #--------------------------------------------------------------------------
-
-  return(
-    list(
-      CARD_object = CARD_object,
-      proportions = proportions,
-      spatial_object = sample_object,
-      image_name = image_name,
-      shared_genes = shared_genes,
-      proportion_file = proportion_file,
-      shared_gene_file = shared_gene_file,
-      object_file = object_file
-    )
+  message(
+    "Completed ",
+    sample_name,
+    ": ",
+    nrow(proportions),
+    " spots x ",
+    ncol(proportions),
+    " cell types."
   )
 }
 
-
-#------------------------------------------------------------------------------
-# 15. Run CARD independently across all spatial slides
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "Running CARD across spatial slides\n",
-  "============================================================\n"
-)
-
-available_spatial_samples <- unique(
-  as.character(
-    spatial_object@meta.data[[spatial_sample_column]]
-  )
-)
-
-samples_to_run <- sample_order[
-  sample_order %in%
-    available_spatial_samples
-]
-
-CARD_results <- list()
-
-for (sample_name in samples_to_run) {
-  CARD_results[[sample_name]] <- run_CARD_sample(
-    spatial_object = spatial_object,
-    sample_name = sample_name,
-    reference_counts = reference_counts,
-    reference_metadata = reference_metadata,
-    reference_cell_types = reference_cell_types,
-    spatial_assay = spatial_assay,
-    spatial_sample_column = spatial_sample_column,
-    image_name = sample_images[[sample_name]],
-    CARD_object_directory = CARD_object_directory,
-    per_sample_results_directory = per_sample_results_directory,
-    min_count_gene = CARD_min_count_gene,
-    min_count_spot = CARD_min_count_spot,
-    minimum_shared_genes = minimum_shared_genes
-  )
-}
-
-CARD_results <- CARD_results[
-  !vapply(
-    CARD_results,
-    is.null,
-    logical(1)
-  )
-]
 
 if (length(CARD_results) == 0) {
   stop(
-    "No CARD analyses completed successfully."
+    "CARD did not complete successfully for any spatial sample."
   )
 }
 
-cat(
-  "\nSuccessfully completed CARD samples:\n"
-)
-
-print(
-  names(
-    CARD_results
-  )
-)
 
 saveRDS(
-  object = CARD_results,
-  file = all_CARD_results_file,
+  CARD_results,
+  CARD_results_file,
   compress = TRUE
 )
 
 
 #------------------------------------------------------------------------------
-# 16. Create shared-gene summary
+# 7. Combine CARD proportions across slides
 #------------------------------------------------------------------------------
 
-shared_gene_summary <- data.frame(
-  sample = names(CARD_results),
-  shared_genes = vapply(
-    CARD_results,
-    function(x) length(x$shared_genes),
-    numeric(1)
-  ),
-  spatial_spots = vapply(
-    CARD_results,
-    function(x) nrow(x$proportions),
-    numeric(1)
-  ),
-  CARD_cell_types = vapply(
-    CARD_results,
-    function(x) ncol(x$proportions),
-    numeric(1)
-  ),
-  stringsAsFactors = FALSE
+CARD_proportion_list <- lapply(
+  names(CARD_results),
+  function(sample_name) {
+
+    current_proportions <- as.data.frame(
+      CARD_results[[sample_name]]$proportions,
+      check.names = FALSE
+    )
+
+
+    current_proportions$spot <- rownames(
+      current_proportions
+    )
+
+    current_proportions$sample <- sample_name
+
+
+    current_proportions
+  }
 )
 
-cat(
-  "\nCARD shared-gene summary:\n"
+
+CARD_proportions <- dplyr::bind_rows(
+  CARD_proportion_list
 )
 
-print(
-  shared_gene_summary
-)
 
-utils::write.csv(
-  shared_gene_summary,
-  shared_gene_summary_file,
+write.csv(
+  CARD_proportions,
+  file.path(
+    results_directory,
+    "CARD_all_spot_proportions.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 17. Define top-three CARD identity function
+# 8. Calculate predominant and top-three CARD identities
 #------------------------------------------------------------------------------
 
-assign_CARD_top3 <- function(
-    proportions
-) {
+assign_CARD_top3 <- function(proportions) {
+
   proportions <- as.matrix(
     proportions
   )
 
-  if (ncol(proportions) < 3) {
-    stop(
-      "CARD proportion matrix contains fewer than three cell types."
-    )
-  }
 
   ranked_indices <- t(
     apply(
       proportions,
       1,
-      function(x) {
-        order(
-          x,
-          decreasing = TRUE,
-          na.last = TRUE
-        )
-      }
-    )
-  )
-
-  top1_index <- ranked_indices[, 1]
-
-  top2_index <- ranked_indices[, 2]
-
-  top3_index <- ranked_indices[, 3]
-
-  top1_identity <- colnames(proportions)[
-    top1_index
-  ]
-
-  top2_identity <- colnames(proportions)[
-    top2_index
-  ]
-
-  top3_identity <- colnames(proportions)[
-    top3_index
-  ]
-
-  spot_index <- seq_len(
-    nrow(proportions)
-  )
-
-  top1_score <- proportions[
-    cbind(
-      spot_index,
-      top1_index
-    )
-  ]
-
-  top2_score <- proportions[
-    cbind(
-      spot_index,
-      top2_index
-    )
-  ]
-
-  top3_score <- proportions[
-    cbind(
-      spot_index,
-      top3_index
-    )
-  ]
-
-  top1_top2_margin <- top1_score -
-    top2_score
-
-  top3_total <- top1_score +
-    top2_score +
-    top3_score
-
-  top3_label <- paste0(
-    top1_identity,
-    " (",
-    round(top1_score, 3),
-    "); ",
-    top2_identity,
-    " (",
-    round(top2_score, 3),
-    "); ",
-    top3_identity,
-    " (",
-    round(top3_score, 3),
-    ")"
-  )
-
-  return(
-    data.frame(
-      CARD_identity = top1_identity,
-      CARD_max_score = top1_score,
-      CARD_second_identity = top2_identity,
-      CARD_second_score = top2_score,
-      CARD_third_identity = top3_identity,
-      CARD_third_score = top3_score,
-      CARD_margin = top1_top2_margin,
-      CARD_top3_total = top3_total,
-      CARD_top3_label = top3_label,
-      row.names = rownames(proportions),
-      stringsAsFactors = FALSE
-    )
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 18. Calculate top-three CARD identities
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Calculating top-three CARD identities per spatial spot\n",
-  "------------------------------------------------------------\n"
-)
-
-CARD_identities <- lapply(
-  CARD_results,
-  function(x) {
-    assign_CARD_top3(
-      x$proportions
-    )
-  }
-)
-
-for (sample_name in names(CARD_identities)) {
-  cat(
-    "\nPredominant CARD identities — ",
-    sample_name,
-    ":\n",
-    sep = ""
-  )
-
-  print(
-    sort(
-      table(
-        CARD_identities[[sample_name]]$CARD_identity
-      ),
+      order,
       decreasing = TRUE
     )
   )
 
-  top3_file <- file.path(
-    per_sample_results_directory,
-    paste0(
-      sample_name,
-      "_CARD_top3_identities.csv"
+
+  if (ncol(ranked_indices) < 3) {
+    stop(
+      "Fewer than three CARD cell types were available."
     )
+  }
+
+
+  top1 <- ranked_indices[, 1]
+  top2 <- ranked_indices[, 2]
+  top3 <- ranked_indices[, 3]
+
+  row_index <- seq_len(
+    nrow(proportions)
   )
 
-  top3_export <- CARD_identities[[sample_name]]
 
-  top3_export$spot <- rownames(
-    top3_export
+  top1_identity <- colnames(proportions)[top1]
+  top2_identity <- colnames(proportions)[top2]
+  top3_identity <- colnames(proportions)[top3]
+
+  top1_score <- proportions[cbind(row_index, top1)]
+  top2_score <- proportions[cbind(row_index, top2)]
+  top3_score <- proportions[cbind(row_index, top3)]
+
+
+  data.frame(
+    CARD_identity = top1_identity,
+    CARD_max_score = top1_score,
+    CARD_second_identity = top2_identity,
+    CARD_second_score = top2_score,
+    CARD_third_identity = top3_identity,
+    CARD_third_score = top3_score,
+    CARD_margin = top1_score - top2_score,
+    CARD_top3_total = top1_score + top2_score + top3_score,
+    row.names = rownames(proportions),
+    stringsAsFactors = FALSE
   )
-
-  utils::write.csv(
-    top3_export,
-    top3_file,
-    row.names = FALSE
-  )
-
-  CARD_results[[sample_name]]$top3_file <- top3_file
 }
 
-saveRDS(
-  object = CARD_identities,
-  file = all_CARD_identities_file,
-  compress = TRUE
-)
 
+CARD_identity_results <- list()
 
-#------------------------------------------------------------------------------
-# 19. Initialize CARD metadata in master spatial object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Adding CARD results to master spatial Seurat object\n",
-  "------------------------------------------------------------\n"
-)
-
-spatial_object$CARD_identity <- NA_character_
-
-spatial_object$CARD_max_score <- NA_real_
-
-spatial_object$CARD_second_identity <- NA_character_
-
-spatial_object$CARD_second_score <- NA_real_
-
-spatial_object$CARD_third_identity <- NA_character_
-
-spatial_object$CARD_third_score <- NA_real_
-
-spatial_object$CARD_margin <- NA_real_
-
-spatial_object$CARD_top3_total <- NA_real_
-
-spatial_object$CARD_top3_label <- NA_character_
-
-
-#------------------------------------------------------------------------------
-# 20. Transfer CARD results into master spatial object
-#------------------------------------------------------------------------------
-
-transfer_summary <- data.frame()
 
 for (sample_name in names(CARD_results)) {
+
+  sample_proportions <- CARD_results[[sample_name]]$proportions
+
+  CARD_identity_results[[sample_name]] <- assign_CARD_top3(
+    sample_proportions
+  )
+}
+
+
+#------------------------------------------------------------------------------
+# 9. Transfer CARD results to master spatial object
+#------------------------------------------------------------------------------
+
+spatial_object$CARD_identity <- NA_character_
+spatial_object$CARD_max_score <- NA_real_
+spatial_object$CARD_second_identity <- NA_character_
+spatial_object$CARD_second_score <- NA_real_
+spatial_object$CARD_third_identity <- NA_character_
+spatial_object$CARD_third_score <- NA_real_
+spatial_object$CARD_margin <- NA_real_
+spatial_object$CARD_top3_total <- NA_real_
+
+
+CARD_cell_types <- sort(
+  unique(
+    unlist(
+      lapply(
+        CARD_results,
+        function(result) {
+          colnames(result$proportions)
+        }
+      )
+    )
+  )
+)
+
+
+# Initialize proportion metadata columns.
+
+for (cell_type in CARD_cell_types) {
+
+  metadata_column <- paste0(
+    "CARD_",
+    make.names(cell_type)
+  )
+
+  spatial_object@meta.data[[metadata_column]] <- NA_real_
+}
+
+
+# Transfer results sample by sample.
+
+for (sample_name in names(CARD_results)) {
+
   proportions <- as.data.frame(
     CARD_results[[sample_name]]$proportions,
     check.names = FALSE
   )
 
-  identities <- CARD_identities[[sample_name]]
+  identities <- CARD_identity_results[[sample_name]]
+
 
   common_spots <- intersect(
     rownames(proportions),
     colnames(spatial_object)
   )
 
-  cat(
-    sample_name,
-    ": ",
-    length(common_spots),
-    " CARD spots matched to master object\n",
-    sep = ""
-  )
 
   if (length(common_spots) == 0) {
+
     warning(
       "No CARD spots matched the master object for ",
-      sample_name
+      sample_name,
+      "."
     )
 
     next
   }
 
 
-  #--------------------------------------------------------------------------
-  # Transfer top-three metadata
-  #--------------------------------------------------------------------------
-
   spatial_object@meta.data[
     common_spots,
     "CARD_identity"
-  ] <- identities[
-    common_spots,
-    "CARD_identity"
-  ]
+  ] <- identities[common_spots, "CARD_identity"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_max_score"
-  ] <- identities[
-    common_spots,
-    "CARD_max_score"
-  ]
+  ] <- identities[common_spots, "CARD_max_score"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_second_identity"
-  ] <- identities[
-    common_spots,
-    "CARD_second_identity"
-  ]
+  ] <- identities[common_spots, "CARD_second_identity"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_second_score"
-  ] <- identities[
-    common_spots,
-    "CARD_second_score"
-  ]
+  ] <- identities[common_spots, "CARD_second_score"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_third_identity"
-  ] <- identities[
-    common_spots,
-    "CARD_third_identity"
-  ]
+  ] <- identities[common_spots, "CARD_third_identity"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_third_score"
-  ] <- identities[
-    common_spots,
-    "CARD_third_score"
-  ]
+  ] <- identities[common_spots, "CARD_third_score"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_margin"
-  ] <- identities[
-    common_spots,
-    "CARD_margin"
-  ]
+  ] <- identities[common_spots, "CARD_margin"]
+
 
   spatial_object@meta.data[
     common_spots,
     "CARD_top3_total"
-  ] <- identities[
-    common_spots,
-    "CARD_top3_total"
-  ]
+  ] <- identities[common_spots, "CARD_top3_total"]
 
-  spatial_object@meta.data[
-    common_spots,
-    "CARD_top3_label"
-  ] <- identities[
-    common_spots,
-    "CARD_top3_label"
-  ]
-
-
-  #--------------------------------------------------------------------------
-  # Transfer all CARD proportions
-  #--------------------------------------------------------------------------
 
   for (cell_type in colnames(proportions)) {
-    safe_column_name <- paste0(
+
+    metadata_column <- paste0(
       "CARD_",
-      make.names(
-        cell_type
-      )
+      make.names(cell_type)
     )
 
-    if (!safe_column_name %in%
-        colnames(spatial_object@meta.data)) {
-      spatial_object@meta.data[
-        ,
-        safe_column_name
-      ] <- NA_real_
-    }
 
     spatial_object@meta.data[
       common_spots,
-      safe_column_name
-    ] <- as.numeric(
-      proportions[
-        common_spots,
-        cell_type
-      ]
-    )
+      metadata_column
+    ] <- proportions[common_spots, cell_type]
   }
-
-
-  #--------------------------------------------------------------------------
-  # Record transfer summary
-  #--------------------------------------------------------------------------
-
-  sample_master_spots <- colnames(spatial_object)[
-    spatial_object@meta.data[[spatial_sample_column]] ==
-      sample_name
-  ]
-
-  current_transfer_summary <- data.frame(
-    sample = sample_name,
-    master_spots = length(sample_master_spots),
-    CARD_spots = nrow(proportions),
-    matched_spots = length(common_spots),
-    stringsAsFactors = FALSE
-  )
-
-  transfer_summary <- dplyr::bind_rows(
-    transfer_summary,
-    current_transfer_summary
-  )
 }
 
-cat(
-  "\nCARD transfer summary:\n"
-)
-
-print(
-  transfer_summary
-)
-
-transfer_summary_file <- file.path(
-  results_directory,
-  "CARD_metadata_transfer_summary.csv"
-)
-
-utils::write.csv(
-  transfer_summary,
-  transfer_summary_file,
-  row.names = FALSE
-)
-
 
 #------------------------------------------------------------------------------
-# 21. Validate CARD metadata
+# 10. Export spot-level CARD summary
 #------------------------------------------------------------------------------
 
-CARD_columns <- grep(
-  "^CARD",
-  colnames(spatial_object@meta.data),
-  value = TRUE
-)
-
-cat(
-  "\nCARD metadata columns added:\n"
-)
-
-print(
-  CARD_columns
-)
-
-cat(
-  "\nPredominant CARD identities across master object:\n"
-)
-
-print(
-  sort(
-    table(
-      spatial_object$CARD_identity,
-      useNA = "ifany"
-    ),
-    decreasing = TRUE
-  )
-)
-
-
-#------------------------------------------------------------------------------
-# 22. Create top-three CARD summary table
-#------------------------------------------------------------------------------
-
-CARD_summary <- data.frame(
-  spot = rownames(
-    spatial_object@meta.data
-  ),
-  sample = spatial_object@meta.data[
-    ,
-    spatial_sample_column
-  ],
-  CARD_identity = spatial_object$CARD_identity,
-  CARD_max_score = spatial_object$CARD_max_score,
-  CARD_second_identity = spatial_object$CARD_second_identity,
-  CARD_second_score = spatial_object$CARD_second_score,
-  CARD_third_identity = spatial_object$CARD_third_identity,
-  CARD_third_score = spatial_object$CARD_third_score,
-  CARD_margin = spatial_object$CARD_margin,
-  CARD_top3_total = spatial_object$CARD_top3_total,
-  CARD_top3_label = spatial_object$CARD_top3_label,
-  stringsAsFactors = FALSE
-)
-
-utils::write.csv(
-  CARD_summary,
-  top3_summary_file,
-  row.names = FALSE
-)
-
-
-#------------------------------------------------------------------------------
-# 23. Summarize predominant CARD identity by sample
-#------------------------------------------------------------------------------
-
-CARD_identity_summary <- CARD_summary %>%
-  dplyr::filter(
-    !is.na(CARD_identity)
+CARD_spot_summary <- spatial_object@meta.data %>%
+  tibble::rownames_to_column(
+    "spot"
   ) %>%
-  dplyr::count(
+  dplyr::select(
+    spot,
     sample,
     CARD_identity,
-    name = "n_spots"
-  ) %>%
-  dplyr::group_by(
-    sample
-  ) %>%
-  dplyr::mutate(
-    proportion = n_spots /
-      sum(n_spots)
-  ) %>%
-  dplyr::ungroup()
+    CARD_max_score,
+    CARD_second_identity,
+    CARD_second_score,
+    CARD_third_identity,
+    CARD_third_score,
+    CARD_margin,
+    CARD_top3_total
+  )
 
-utils::write.csv(
-  CARD_identity_summary,
-  identity_summary_file,
+
+write.csv(
+  CARD_spot_summary,
+  file.path(
+    results_directory,
+    "CARD_top3_spot_summary.csv"
+  ),
   row.names = FALSE
 )
 
 
 #------------------------------------------------------------------------------
-# 24. Create consistent CARD identity color palette
+# 11. Whole-slide CARD scatter-pie composition plots
 #------------------------------------------------------------------------------
 
-CARD_identity_levels <- sort(
-  unique(
-    stats::na.omit(
-      spatial_object$CARD_identity
-    )
-  )
-)
+# Each pie represents one Visium spot. Pie slices show the complete inferred
+# CARD cell-type mixture within that spot.
 
-CARD_identity_colors <- stats::setNames(
+CARD_pie_colors <- stats::setNames(
   scales::hue_pal()(
-    length(CARD_identity_levels)
+    length(CARD_cell_types)
   ),
-  CARD_identity_levels
+  CARD_cell_types
 )
 
 
-#------------------------------------------------------------------------------
-# 25. Generate predominant CARD identity spatial plots
-#------------------------------------------------------------------------------
+for (sample_name in names(CARD_results)) {
 
-cat(
-  "\n------------------------------------------------------------\n",
-  "Generating predominant CARD identity spatial plots\n",
-  "------------------------------------------------------------\n"
-)
+  current_proportions <- as.data.frame(
+    CARD_results[[sample_name]]$proportions,
+    check.names = FALSE
+  )
 
-CARD_identity_plots <- list()
 
-CARD_identity_plot_files <- character(0)
+  current_coordinates <- as.data.frame(
+    CARD_results[[sample_name]]$CARD_object@spatial_location
+  )
 
-for (sample_name in sample_order) {
-  image_name <- sample_images[[sample_name]]
 
-  if (!image_name %in%
-      Seurat::Images(spatial_object)) {
-    warning(
-      "Spatial image was not found: ",
-      image_name
-    )
+  common_plot_spots <- intersect(
+    rownames(current_proportions),
+    rownames(current_coordinates)
+  )
 
-    next
-  }
 
-  current_plot <- Seurat::SpatialDimPlot(
-    object = spatial_object,
-    group.by = "CARD_identity",
-    images = image_name,
-    cols = CARD_identity_colors,
-    pt.size.factor = 1.6,
-    stroke = 0
+  current_proportions <- current_proportions[
+    common_plot_spots,
+    ,
+    drop = FALSE
+  ]
+
+
+  current_coordinates <- current_coordinates[
+    common_plot_spots,
+    ,
+    drop = FALSE
+  ]
+
+
+  current_cell_types <- intersect(
+    CARD_cell_types,
+    colnames(current_proportions)
+  )
+
+
+  current_pie_proportions <- current_proportions[
+    ,
+    current_cell_types,
+    drop = FALSE
+  ]
+
+
+  current_pie_colors <- CARD_pie_colors[
+    current_cell_types
+  ]
+
+
+  current_pie_plot <- CARD::CARD.visualize.pie(
+    proportion = current_pie_proportions,
+    spatial_location = current_coordinates,
+    colors = current_pie_colors,
+    radius = NULL,
+    seed = 1234
   ) +
     ggplot2::labs(
       title = paste0(
         sample_titles[[sample_name]],
-        " — Predominant CARD Identity"
+        " — CARD cell-type composition per spot"
       )
     ) +
     ggplot2::theme(
@@ -1758,61 +998,26 @@ for (sample_name in sample_order) {
         hjust = 0.5,
         face = "bold"
       ),
-      legend.title = ggplot2::element_blank()
-    )
-
-  current_file <- file.path(
-    figure_directory,
-    paste0(
-      sample_name,
-      "_CARD_predominant_identity.png"
-    )
-  )
-
-  ggplot2::ggsave(
-    filename = current_file,
-    plot = current_plot,
-    width = 9,
-    height = 8,
-    dpi = 600,
-    bg = "white"
-  )
-
-  CARD_identity_plots[[sample_name]] <- current_plot
-
-  CARD_identity_plot_files <- c(
-    CARD_identity_plot_files,
-    current_file
-  )
-}
-
-
-#------------------------------------------------------------------------------
-# 26. Save combined CARD identity overview
-#------------------------------------------------------------------------------
-
-combined_CARD_identity_file <- NULL
-
-if (length(CARD_identity_plots) > 0) {
-  combined_CARD_identity_plot <- patchwork::wrap_plots(
-    CARD_identity_plots,
-    ncol = 2,
-    guides = "collect"
-  ) &
-    ggplot2::theme(
       legend.position = "right"
     )
 
-  combined_CARD_identity_file <- file.path(
-    figure_directory,
-    "CARD_predominant_identity_all_samples.png"
+
+  print(
+    current_pie_plot
   )
 
-  ggplot2::ggsave(
-    filename = combined_CARD_identity_file,
-    plot = combined_CARD_identity_plot,
-    width = 18,
-    height = 14,
+
+  ggsave(
+    file.path(
+      figure_directory,
+      paste0(
+        sample_name,
+        "_CARD_spot_composition_scatterpie.png"
+      )
+    ),
+    current_pie_plot,
+    width = 12,
+    height = 10,
     dpi = 600,
     bg = "white",
     limitsize = FALSE
@@ -1821,328 +1026,386 @@ if (length(CARD_identity_plots) > 0) {
 
 
 #------------------------------------------------------------------------------
-# 27. Determine selected myeloid CARD features
+# 12. CARD all-cell-type spatial proportion panels
 #------------------------------------------------------------------------------
 
-selected_CARD_features <- paste0(
-  "CARD_",
-  make.names(
-    selected_CARD_cell_types
-  )
-)
+# CARD-native continuous proportion maps are generated for every cell type on
+# every slide using the original cornflowerblue-cornsilk-red scale.
 
-available_CARD_features <- intersect(
-  selected_CARD_features,
-  colnames(spatial_object@meta.data)
-)
+for (sample_name in names(CARD_results)) {
 
-cat(
-  "\nSelected CARD features available for plotting:\n"
-)
-
-print(
-  available_CARD_features
-)
-
-
-#------------------------------------------------------------------------------
-# 28. Generate selected CARD SpatialFeaturePlots
-#------------------------------------------------------------------------------
-
-selected_feature_plot_files <- character(0)
-
-for (sample_name in sample_order) {
-  image_name <- sample_images[[sample_name]]
-
-  if (!image_name %in%
-      Seurat::Images(spatial_object)) {
-    next
-  }
-
-  sample_feature_directory <- file.path(
-    spatial_feature_directory,
-    sample_name
+  current_proportions <- as.data.frame(
+    CARD_results[[sample_name]]$proportions,
+    check.names = FALSE
   )
 
-  dir.create(
-    sample_feature_directory,
-    recursive = TRUE,
-    showWarnings = FALSE
+
+  current_coordinates <- as.data.frame(
+    CARD_results[[sample_name]]$CARD_object@spatial_location
   )
 
-  for (feature_name in available_CARD_features) {
-    clean_feature_name <- gsub(
-      "^CARD_",
-      "",
-      feature_name
+
+  common_plot_spots <- intersect(
+    rownames(current_proportions),
+    rownames(current_coordinates)
+  )
+
+
+  current_proportions <- current_proportions[
+    common_plot_spots,
+    ,
+    drop = FALSE
+  ]
+
+
+  current_coordinates <- current_coordinates[
+    common_plot_spots,
+    ,
+    drop = FALSE
+  ]
+
+
+  current_cell_types <- intersect(
+    CARD_cell_types,
+    colnames(current_proportions)
+  )
+
+
+  CARD_all_cell_types_plot <- CARD::CARD.visualize.prop(
+    proportion = current_proportions,
+    spatial_location = current_coordinates,
+    ct.visualize = current_cell_types,
+    colors = card_proportion_colors,
+    NumCols = 4,
+    pointSize = 1
+  ) +
+    ggplot2::labs(
+      title = paste0(
+        sample_titles[[sample_name]],
+        " — CARD proportions: all SingleR cell types"
+      ),
+      color = "Relative\nproportion"
+    ) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        hjust = 0.5,
+        face = "bold"
+      )
     )
 
-    current_plot <- Seurat::SpatialFeaturePlot(
-      object = spatial_object,
-      features = feature_name,
-      images = image_name,
-      pt.size.factor = 1.6
-    ) +
-      ggplot2::labs(
-        title = paste0(
-          sample_titles[[sample_name]],
-          " — ",
-          clean_feature_name
-        )
-      ) +
-      ggplot2::theme(
-        plot.title = ggplot2::element_text(
-          hjust = 0.5,
-          face = "bold"
-        )
-      )
 
-    current_file <- file.path(
-      sample_feature_directory,
+  print(
+    CARD_all_cell_types_plot
+  )
+
+
+  panel_height <- max(
+    9,
+    3.2 * ceiling(length(current_cell_types) / 4)
+  )
+
+
+  ggsave(
+    file.path(
+      figure_directory,
       paste0(
         sample_name,
-        "_",
-        feature_name,
-        ".png"
+        "_CARD_all_cell_type_proportions.png"
       )
-    )
-
-    ggplot2::ggsave(
-      filename = current_file,
-      plot = current_plot,
-      width = 8,
-      height = 8,
-      dpi = 600,
-      bg = "white"
-    )
-
-    selected_feature_plot_files <- c(
-      selected_feature_plot_files,
-      current_file
-    )
-  }
-}
-
-
-#------------------------------------------------------------------------------
-# 29. Save final CARD-annotated master spatial object
-#------------------------------------------------------------------------------
-
-cat(
-  "\n------------------------------------------------------------\n",
-  "Saving final CARD-annotated spatial object\n",
-  "------------------------------------------------------------\n"
-)
-
-saveRDS(
-  object = spatial_object,
-  file = final_CARD_object_file,
-  compress = TRUE
-)
-
-if (!file.exists(final_CARD_object_file)) {
-  stop(
-    "Final CARD-annotated spatial Seurat object was not saved successfully."
+    ),
+    CARD_all_cell_types_plot,
+    width = 16,
+    height = panel_height,
+    dpi = 600,
+    bg = "white",
+    limitsize = FALSE
   )
 }
 
 
 #------------------------------------------------------------------------------
-# 30. Save complete final metadata table
+# 13. Mean CARD cell-type composition by sample
 #------------------------------------------------------------------------------
 
-final_metadata <- spatial_object@meta.data
+CARD_mean_proportions <- CARD_proportions %>%
+  tidyr::pivot_longer(
+    cols = -c(
+      spot,
+      sample
+    ),
+    names_to = "cell_type",
+    values_to = "proportion"
+  ) %>%
+  dplyr::group_by(
+    sample,
+    cell_type
+  ) %>%
+  dplyr::summarise(
+    mean_proportion = mean(
+      proportion,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::group_by(
+    sample
+  ) %>%
+  dplyr::mutate(
+    normalized_mean_proportion =
+      mean_proportion / sum(mean_proportion, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup()
 
-final_metadata$spot <- rownames(
-  final_metadata
-)
 
-utils::write.csv(
-  final_metadata,
-  metadata_file,
+write.csv(
+  CARD_mean_proportions,
+  file.path(
+    results_directory,
+    "CARD_mean_proportion_by_sample.csv"
+  ),
   row.names = FALSE
 )
 
 
+CARD_composition_colors <- stats::setNames(
+  scales::hue_pal()(
+    length(CARD_cell_types)
+  ),
+  CARD_cell_types
+)
+
+
+CARD_mean_composition_plot <- ggplot(
+  CARD_mean_proportions,
+  aes(
+    x = factor(
+      sample,
+      levels = sample_order
+    ),
+    y = normalized_mean_proportion,
+    fill = cell_type
+  )
+) +
+  geom_col(
+    width = 0.75
+  ) +
+  scale_fill_manual(
+    values = CARD_composition_colors
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent(
+      accuracy = 1
+    ),
+    expand = expansion(
+      mult = c(0, 0.02)
+    )
+  ) +
+  labs(
+    title = "Mean CARD cell-type composition by sample",
+    x = NULL,
+    y = "Mean inferred CARD proportion",
+    fill = "Cell type"
+  ) +
+  theme_classic(
+    base_size = 12
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1
+    )
+  )
+
+
+print(
+  CARD_mean_composition_plot
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "CARD_mean_cell_type_composition_by_sample.png"
+  ),
+  CARD_mean_composition_plot,
+  width = 11,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+
 #------------------------------------------------------------------------------
-# 31. Save CARD analysis parameters
+# 14. Relative CARD abundance heatmap
 #------------------------------------------------------------------------------
+
+# Absolute CARD proportions are strongly influenced by abundant populations.
+# For visualization, mean proportions are standardized within each cell type
+# across samples. This highlights relative differences between tissue sections
+# without altering the underlying CARD estimates.
+
+CARD_relative_proportions <- CARD_mean_proportions %>%
+  dplyr::group_by(
+    cell_type
+  ) %>%
+  dplyr::mutate(
+    relative_abundance = as.numeric(
+      scale(mean_proportion)
+    )
+  ) %>%
+  dplyr::ungroup()
+
+
+CARD_relative_proportions$relative_abundance[
+  !is.finite(CARD_relative_proportions$relative_abundance)
+] <- 0
+
+
+CARD_heatmap_order <- CARD_mean_proportions %>%
+  dplyr::group_by(
+    cell_type
+  ) %>%
+  dplyr::summarise(
+    overall_mean = mean(
+      mean_proportion,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    overall_mean
+  ) %>%
+  dplyr::pull(
+    cell_type
+  )
+
+
+CARD_relative_proportions <- CARD_relative_proportions %>%
+  dplyr::mutate(
+    cell_type = factor(
+      cell_type,
+      levels = CARD_heatmap_order
+    )
+  )
+
+
+CARD_relative_heatmap <- ggplot(
+  CARD_relative_proportions,
+  aes(
+    x = factor(
+      sample,
+      levels = sample_order
+    ),
+    y = cell_type,
+    fill = relative_abundance
+  )
+) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "#F7F7F7",
+    high = "#B2182B",
+    midpoint = 0,
+    name = "Relative\nabundance"
+  ) +
+  labs(
+    title = "Relative CARD cell-type proportions across samples",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_classic(
+    base_size = 11
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    ),
+    axis.ticks.y = element_blank()
+  )
+
+
+print(
+  CARD_relative_heatmap
+)
+
+
+heatmap_height <- max(
+  6,
+  0.35 * length(CARD_heatmap_order) + 2
+)
+
+
+ggsave(
+  file.path(
+    figure_directory,
+    "CARD_relative_cell_type_proportion_heatmap.png"
+  ),
+  CARD_relative_heatmap,
+  width = 8,
+  height = heatmap_height,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+
+#------------------------------------------------------------------------------
+# 15. Save final CARD-annotated spatial object
+#------------------------------------------------------------------------------
+
+saveRDS(
+  spatial_object,
+  final_CARD_object_file,
+  compress = TRUE
+)
+
 
 CARD_parameters <- data.frame(
   parameter = c(
     "reference_assay",
     "reference_cell_type_column",
-    "reference_sample_column",
     "spatial_assay",
     "spatial_sample_column",
-    "minimum_shared_genes_warning",
     "minCountGene",
     "minCountSpot",
-    "CARD_imputation",
-    "CARD_num_grids",
-    "CARD_num_neighbors"
+    "random_seed"
   ),
   value = c(
     reference_assay,
     reference_cell_type_column,
-    reference_sample_column,
     spatial_assay,
     spatial_sample_column,
-    minimum_shared_genes,
     CARD_min_count_gene,
     CARD_min_count_spot,
-    run_CARD_imputation,
-    CARD_num_grids,
-    CARD_num_neighbors
+    1234
   ),
   stringsAsFactors = FALSE
 )
 
-utils::write.csv(
+
+write.csv(
   CARD_parameters,
-  parameter_file,
+  file.path(
+    results_directory,
+    "CARD_parameters.csv"
+  ),
   row.names = FALSE
 )
 
 
-#------------------------------------------------------------------------------
-# 32. Validate expected Module 14 outputs
-#------------------------------------------------------------------------------
-
-expected_object_files <- c(
-  all_CARD_results_file,
-  all_CARD_identities_file,
-  final_CARD_object_file,
-  vapply(
-    CARD_results,
-    function(x) x$object_file,
-    character(1)
-  )
-)
-
-expected_result_files <- c(
-  reference_metadata_file,
-  reference_summary_file,
-  shared_gene_summary_file,
-  top3_summary_file,
-  identity_summary_file,
-  metadata_file,
-  transfer_summary_file,
-  parameter_file,
-  unlist(
-    lapply(
-      CARD_results,
-      function(x) {
-        c(
-          x$proportion_file,
-          x$shared_gene_file,
-          x$top3_file
-        )
-      }
-    ),
-    use.names = FALSE
-  )
-)
-
-expected_figure_files <- c(
-  CARD_identity_plot_files,
-  selected_feature_plot_files
-)
-
-if (!is.null(combined_CARD_identity_file)) {
-  expected_figure_files <- c(
-    expected_figure_files,
-    combined_CARD_identity_file
-  )
-}
-
-
-missing_object_files <- expected_object_files[
-  !file.exists(expected_object_files)
-]
-
-missing_result_files <- expected_result_files[
-  !file.exists(expected_result_files)
-]
-
-missing_figure_files <- expected_figure_files[
-  !file.exists(expected_figure_files)
-]
-
-
-if (length(missing_object_files) > 0) {
-  stop(
-    "One or more expected Module 14 object files were not created:\n",
-    paste(
-      missing_object_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_result_files) > 0) {
-  stop(
-    "One or more expected Module 14 result files were not created:\n",
-    paste(
-      missing_result_files,
-      collapse = "\n"
-    )
-  )
-}
-
-if (length(missing_figure_files) > 0) {
-  stop(
-    "One or more expected Module 14 figure files were not created:\n",
-    paste(
-      missing_figure_files,
-      collapse = "\n"
-    )
-  )
-}
-
-cat(
-  "All expected Module 14 outputs were created successfully.\n"
-)
-
-
-#------------------------------------------------------------------------------
-# 33. Final module summary
-#------------------------------------------------------------------------------
-
-cat(
-  "\n============================================================\n",
-  "MODULE 14 COMPLETE — Spatial CARD deconvolution\n",
-  "============================================================\n",
-  "Samples analyzed:          ",
-  paste(
-    names(CARD_results),
-    collapse = ", "
-  ),
-  "\n",
-  "Reference cells:           ", ncol(reference_counts), "\n",
-  "Reference genes:           ", nrow(reference_counts), "\n",
-  "Reference cell types:      ", length(reference_cell_types), "\n",
-  "Minimum shared genes:      ", minimum_shared_genes, "\n",
-  "CARD minCountGene:         ", CARD_min_count_gene, "\n",
-  "CARD minCountSpot:         ", CARD_min_count_spot, "\n",
-  "CARD metadata columns:     ", length(CARD_columns), "\n",
-  "\n",
-  "Primary downstream object:\n",
-  "  ", final_CARD_object_file, "\n",
-  "\n",
-  "CARD objects:\n",
-  "  ", CARD_object_directory, "\n",
-  "\n",
-  "CARD result tables:\n",
-  "  ", results_directory, "\n",
-  "\n",
-  "CARD figures:\n",
-  "  ", figure_directory, "\n",
-  "\n",
-  "Selected CARD proportion plots:\n",
-  "  ", spatial_feature_directory, "\n",
-  "============================================================\n\n",
-  sep = ""
+message(
+  "Module 13 complete: CARD deconvolution completed for ",
+  length(CARD_results),
+  " spatial slides and transferred to the final spatial object."
 )
 ```
 
